@@ -267,6 +267,18 @@ inprogress_watchdog_scan_loops: 1
 
 - `supervisor_enabled`, `supervisor_restart_delay_sec` 변경은 daemon 재시작 후 반영됩니다.
 
+### 5) 바이너리 업데이트 후 일괄 반영
+
+새 `ralphctl` 바이너리 설치 후:
+
+```bash
+ralphctl reload
+```
+
+- 연결된 프로젝트(현재 프로젝트 + fleet 등록 프로젝트)의 `./ralph` wrapper를 새 바이너리로 갱신
+- 기존에 실행 중이던 loop/role worker/telegram daemon만 자동 재시작
+- 현재 프로젝트만 반영하려면: `ralphctl reload --current-only`
+
 ## License
 
 MIT (`LICENSE`)

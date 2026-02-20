@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -39,7 +40,7 @@ func run() error {
 
 	global.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: ralphctl [--control-dir DIR] [--project-dir DIR] <command> [args]")
-		fmt.Fprintln(os.Stderr, "Commands: list-plugins, install, apply-plugin, registry, setup, init, on, off, new, import-prd, recover, doctor, run, supervise, start, stop, restart, status, tail, service, fleet, telegram")
+		fmt.Fprintln(os.Stderr, "Commands: list-plugins, install, apply-plugin, registry, setup, reload, init, on, off, new, import-prd, recover, doctor, run, supervise, start, stop, restart, status, tail, service, fleet, telegram")
 	}
 
 	if err := global.Parse(os.Args[1:]); err != nil {
@@ -206,6 +207,29 @@ func run() error {
 			}
 			fmt.Printf("Daemon: %s\n", startResult)
 		}
+		return nil
+
+	case "reload":
+		fs := flag.NewFlagSet("reload", flag.ContinueOnError)
+		restartRunning := fs.Bool("restart-running", true, "restart loop/telegram daemons that were running before reload")
+		telegram := fs.Bool("telegram", true, "reload telegram daemon when it is running")
+		currentOnly := fs.Bool("current-only", false, "reload only current project")
+		if err := fs.Parse(cmdArgs); err != nil {
+			return err
+		}
+		exe, err := executablePath()
+		if err != nil {
+			return err
+		}
+		results, err := reloadConnectedProjects(*controlDir, paths, exe, reloadOptions{
+			RestartRunning: *restartRunning,
+			ReloadTelegram: *telegram,
+			CurrentOnly:    *currentOnly,
+		})
+		if err != nil {
+			return err
+		}
+		printReloadSummary(os.Stdout, exe, *controlDir, results)
 		return nil
 
 	case "init":
@@ -489,6 +513,33 @@ type startOptions struct {
 	Out          io.Writer
 }
 
+type reloadOptions struct {
+	RestartRunning bool
+	ReloadTelegram bool
+	CurrentOnly    bool
+}
+
+type reloadTarget struct {
+	ID        string
+	Paths     ralph.Paths
+	Source    string
+	IsCurrent bool
+}
+
+type reloadProjectResult struct {
+	ID                 string
+	ProjectDir         string
+	Source             string
+	WrapperUpdated     bool
+	PrimaryWasRunning  bool
+	PrimaryPID         int
+	PrimaryRestarted   bool
+	RoleWorkers        []string
+	TelegramWasRunning bool
+	TelegramPID        int
+	TelegramRestarted  bool
+}
+
 func startProjectDaemon(paths ralph.Paths, opts startOptions) (string, error) {
 	out := opts.Out
 	if out == nil {
@@ -526,6 +577,220 @@ func startProjectDaemon(paths ralph.Paths, opts startOptions) (string, error) {
 		return fmt.Sprintf("ralph-loop already running (pid=%d)", pid), nil
 	}
 	return fmt.Sprintf("ralph-loop started (pid=%d)", pid), nil
+}
+
+func reloadConnectedProjects(controlDir string, currentPaths ralph.Paths, executable string, opts reloadOptions) ([]reloadProjectResult, error) {
+	targets, err := resolveReloadTargets(controlDir, currentPaths, opts.CurrentOnly)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]reloadProjectResult, 0, len(targets))
+	for _, target := range targets {
+		res, err := reloadSingleProject(target, executable, opts)
+		if err != nil {
+			return nil, fmt.Errorf("reload project %s (%s): %w", target.ID, target.Paths.ProjectDir, err)
+		}
+		results = append(results, res)
+	}
+	return results, nil
+}
+
+func resolveReloadTargets(controlDir string, currentPaths ralph.Paths, currentOnly bool) ([]reloadTarget, error) {
+	targetByDir := map[string]reloadTarget{}
+	add := func(t reloadTarget) {
+		key := t.Paths.ProjectDir
+		if key == "" {
+			return
+		}
+		existing, ok := targetByDir[key]
+		if !ok {
+			targetByDir[key] = t
+			return
+		}
+		if existing.Source == "current" && t.Source == "fleet" {
+			t.IsCurrent = existing.IsCurrent
+			targetByDir[key] = t
+			return
+		}
+		if t.IsCurrent {
+			existing.IsCurrent = true
+			targetByDir[key] = existing
+		}
+	}
+
+	includeCurrent := projectLooksManaged(currentPaths)
+	if currentOnly {
+		if !includeCurrent {
+			return nil, fmt.Errorf("current project is not managed yet (run setup first or omit --current-only)")
+		}
+		add(reloadTarget{
+			ID:        "current",
+			Paths:     currentPaths,
+			Source:    "current",
+			IsCurrent: true,
+		})
+	} else {
+		if includeCurrent {
+			add(reloadTarget{
+				ID:        "current",
+				Paths:     currentPaths,
+				Source:    "current",
+				IsCurrent: true,
+			})
+		}
+
+		cfg, err := ralph.LoadFleetConfig(controlDir)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range cfg.Projects {
+			paths, err := ralph.NewPaths(controlDir, p.ProjectDir)
+			if err != nil {
+				return nil, err
+			}
+			add(reloadTarget{
+				ID:        p.ID,
+				Paths:     paths,
+				Source:    "fleet",
+				IsCurrent: filepath.Clean(paths.ProjectDir) == filepath.Clean(currentPaths.ProjectDir),
+			})
+		}
+	}
+
+	if len(targetByDir) == 0 {
+		return nil, fmt.Errorf("no connected projects found (fleet empty and current project unmanaged)")
+	}
+
+	targets := make([]reloadTarget, 0, len(targetByDir))
+	for _, t := range targetByDir {
+		targets = append(targets, t)
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].IsCurrent != targets[j].IsCurrent {
+			return targets[i].IsCurrent
+		}
+		return targets[i].ID < targets[j].ID
+	})
+	return targets, nil
+}
+
+func projectLooksManaged(paths ralph.Paths) bool {
+	if _, err := os.Stat(filepath.Join(paths.ProjectDir, "ralph")); err == nil {
+		return true
+	}
+	if _, err := os.Stat(paths.RalphDir); err == nil {
+		return true
+	}
+	if _, running, _ := telegramPIDState(paths.PIDFile); running {
+		return true
+	}
+	_, rolePIDs := ralph.RunningRoleDaemons(paths)
+	return len(rolePIDs) > 0
+}
+
+func reloadSingleProject(target reloadTarget, executable string, opts reloadOptions) (reloadProjectResult, error) {
+	paths := target.Paths
+	if err := ralph.EnsureLayout(paths); err != nil {
+		return reloadProjectResult{}, err
+	}
+
+	primaryPID, primaryRunning, _ := telegramPIDState(paths.PIDFile)
+	roleWorkers, _ := ralph.RunningRoleDaemons(paths)
+	sort.Strings(roleWorkers)
+	telegramPID, telegramRunning, _ := telegramPIDState(paths.TelegramPIDFile())
+
+	res := reloadProjectResult{
+		ID:                 target.ID,
+		ProjectDir:         paths.ProjectDir,
+		Source:             target.Source,
+		PrimaryWasRunning:  primaryRunning,
+		PrimaryPID:         primaryPID,
+		RoleWorkers:        append([]string(nil), roleWorkers...),
+		TelegramWasRunning: telegramRunning,
+		TelegramPID:        telegramPID,
+	}
+
+	if opts.RestartRunning {
+		for _, role := range roleWorkers {
+			if err := ralph.StopRoleDaemon(paths, role); err != nil {
+				return res, err
+			}
+		}
+		if primaryRunning {
+			if err := ralph.StopPrimaryDaemon(paths); err != nil {
+				return res, err
+			}
+		}
+		if opts.ReloadTelegram && telegramRunning {
+			if _, err := stopTelegramDaemon(paths); err != nil {
+				return res, err
+			}
+		}
+	}
+
+	if err := ralph.WriteProjectWrapper(paths, executable); err != nil {
+		return res, err
+	}
+	res.WrapperUpdated = true
+
+	if !opts.RestartRunning {
+		return res, nil
+	}
+
+	for _, role := range roleWorkers {
+		_, _, err := ralph.StartRoleDaemon(paths, role)
+		if err != nil {
+			return res, err
+		}
+	}
+	if len(roleWorkers) > 0 {
+		res.PrimaryRestarted = true
+	}
+	if primaryRunning {
+		_, _, err := ralph.StartDaemon(paths)
+		if err != nil {
+			return res, err
+		}
+		res.PrimaryRestarted = true
+	}
+	if opts.ReloadTelegram && telegramRunning {
+		runArgs := ensureTelegramForegroundArg([]string{"--config-file", telegramConfigFileFromArgs(paths.ControlDir, nil)})
+		if _, err := startTelegramDaemon(paths, runArgs); err != nil {
+			return res, err
+		}
+		res.TelegramRestarted = true
+	}
+	return res, nil
+}
+
+func printReloadSummary(out io.Writer, executable, controlDir string, results []reloadProjectResult) {
+	fmt.Fprintln(out, "Ralph Reload")
+	fmt.Fprintln(out, "============")
+	fmt.Fprintf(out, "- control_dir: %s\n", controlDir)
+	fmt.Fprintf(out, "- binary: %s\n", executable)
+	fmt.Fprintf(out, "- projects: %d\n", len(results))
+	for _, res := range results {
+		fmt.Fprintf(out, "\n[%s] %s\n", res.ID, res.ProjectDir)
+		fmt.Fprintf(out, "- source: %s\n", res.Source)
+		fmt.Fprintf(out, "- wrapper: updated\n")
+		fmt.Fprintf(out, "- daemon_primary: %s\n", reloadRunStateLabel(res.PrimaryWasRunning, res.PrimaryRestarted, res.PrimaryPID))
+		if len(res.RoleWorkers) == 0 {
+			fmt.Fprintf(out, "- daemon_roles: none\n")
+		} else {
+			fmt.Fprintf(out, "- daemon_roles: %s\n", strings.Join(res.RoleWorkers, ","))
+		}
+		fmt.Fprintf(out, "- telegram: %s\n", reloadRunStateLabel(res.TelegramWasRunning, res.TelegramRestarted, res.TelegramPID))
+	}
+}
+
+func reloadRunStateLabel(wasRunning, restarted bool, pid int) string {
+	if !wasRunning {
+		return "not-running"
+	}
+	if restarted {
+		return fmt.Sprintf("restarted(previous_pid=%d)", pid)
+	}
+	return fmt.Sprintf("running(previous_pid=%d)", pid)
 }
 
 func runServiceCommand(paths ralph.Paths, args []string) error {
@@ -1311,7 +1576,7 @@ func defaultControlDir(cwd string) string {
 
 func commandNeedsControlAssets(cmd string) bool {
 	switch cmd {
-	case "list-plugins", "install", "apply-plugin", "setup", "fleet", "registry", "service", "telegram":
+	case "list-plugins", "install", "apply-plugin", "setup", "reload", "fleet", "registry", "service", "telegram":
 		return true
 	default:
 		return false

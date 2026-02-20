@@ -101,12 +101,24 @@ func Install(paths Paths, pluginName, executablePath string) error {
 		return fmt.Errorf("write config.env: %w", err)
 	}
 
+	if err := WriteProjectWrapper(paths, executablePath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func WriteProjectWrapper(paths Paths, executablePath string) error {
+	if err := EnsureLayout(paths); err != nil {
+		return err
+	}
+	if executablePath == "" {
+		return fmt.Errorf("executable path is required")
+	}
 	wrapper := fmt.Sprintf("#!/usr/bin/env bash\nset -euo pipefail\nexec %q --control-dir %q --project-dir %q \"$@\"\n", executablePath, paths.ControlDir, paths.ProjectDir)
 	wrapperPath := filepath.Join(paths.ProjectDir, "ralph")
 	if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o755); err != nil {
 		return fmt.Errorf("write wrapper script: %w", err)
 	}
-
 	return nil
 }
 
