@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestParseTelegramChatIDs(t *testing.T) {
@@ -78,6 +79,32 @@ func TestSplitTelegramMessage(t *testing.T) {
 		if len([]rune(p)) > 8 {
 			t.Fatalf("chunk too long: %q", p)
 		}
+	}
+}
+
+func TestCompactTelegramErrorUnicodeSafe(t *testing.T) {
+	t.Parallel()
+
+	raw := strings.Repeat("🔥비트코인 자동화 ", 40)
+	got := compactTelegramError(raw)
+	if !utf8.ValidString(got) {
+		t.Fatalf("output must be valid UTF-8: %q", got)
+	}
+	if len([]rune(got)) > 300 {
+		t.Fatalf("output should be capped at 300 runes: %d", len([]rune(got)))
+	}
+}
+
+func TestCompactTelegramErrorInvalidUTF8Sanitized(t *testing.T) {
+	t.Parallel()
+
+	raw := string([]byte{0xff, 0xfe, 'a', 'b', 'c'})
+	got := compactTelegramError(raw)
+	if !utf8.ValidString(got) {
+		t.Fatalf("output must be valid UTF-8: %q", got)
+	}
+	if !strings.Contains(got, "abc") {
+		t.Fatalf("sanitized output should preserve readable content: %q", got)
 	}
 }
 

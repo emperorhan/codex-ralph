@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"unicode/utf8"
 
 	"codex-ralph/internal/ralph"
 )
@@ -50,6 +51,32 @@ func TestCompactSingleLine(t *testing.T) {
 	got := compactSingleLine(" a\nb   c ", 4)
 	if got != "a..." {
 		t.Fatalf("compactSingleLine mismatch: got=%q want=%q", got, "a...")
+	}
+}
+
+func TestCompactSingleLineUnicodeSafe(t *testing.T) {
+	t.Parallel()
+
+	// 4-byte emoji + Korean should not be cut mid-rune.
+	got := compactSingleLine("🔥비트코인 자동화", 5)
+	if !utf8.ValidString(got) {
+		t.Fatalf("output must be valid UTF-8: %q", got)
+	}
+	if got == "" {
+		t.Fatalf("output should not be empty")
+	}
+}
+
+func TestCompactSingleLineInvalidUTF8Sanitized(t *testing.T) {
+	t.Parallel()
+
+	raw := string([]byte{0xff, 0xfe, 'a', 'b', 'c'})
+	got := compactSingleLine(raw, 10)
+	if !utf8.ValidString(got) {
+		t.Fatalf("output must be valid UTF-8: %q", got)
+	}
+	if got == "" {
+		t.Fatalf("output should not be empty")
 	}
 }
 

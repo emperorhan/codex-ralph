@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const defaultTelegramBaseURL = "https://api.telegram.org"
@@ -628,8 +629,12 @@ func compactTelegramError(raw string) string {
 	}
 	raw = strings.ReplaceAll(raw, "\n", " ")
 	raw = strings.Join(strings.Fields(raw), " ")
-	if len(raw) > 300 {
-		return raw[:297] + "..."
+	if !utf8.ValidString(raw) {
+		raw = string(bytes.ToValidUTF8([]byte(raw), []byte("?")))
+	}
+	runes := []rune(raw)
+	if len(runes) > 300 {
+		return string(runes[:297]) + "..."
 	}
 	return raw
 }

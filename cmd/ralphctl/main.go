@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"codex-ralph/internal/ralph"
 )
@@ -1550,13 +1552,20 @@ func compactSingleLine(raw string, maxLen int) string {
 	v = strings.ReplaceAll(v, "\n", " ")
 	v = strings.ReplaceAll(v, "\r", " ")
 	v = strings.Join(strings.Fields(v), " ")
-	if maxLen <= 0 || len(v) <= maxLen {
+	if !utf8.ValidString(v) {
+		v = string(bytes.ToValidUTF8([]byte(v), []byte("?")))
+	}
+	if maxLen <= 0 {
+		return v
+	}
+	runes := []rune(v)
+	if len(runes) <= maxLen {
 		return v
 	}
 	if maxLen <= 3 {
-		return v[:maxLen]
+		return string(runes[:maxLen])
 	}
-	return v[:maxLen-3] + "..."
+	return string(runes[:maxLen-3]) + "..."
 }
 
 func valueOrDash(raw string) string {
