@@ -1,0 +1,43 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - id: coverage
+        name: Run go test with coverage
+        run: |
+          set -euo pipefail
+          go test ./... -covermode=atomic -coverprofile=coverage.out
+          go tool cover -func=coverage.out | tee coverage.txt
+          total="$(awk '/^total:/ {print $3}' coverage.txt)"
+          echo "total=${total}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.sha }}
+          path: |
+            coverage.out
+            coverage.txt
+          if-no-files-found: error
+
+      - name: Publish test summary
+        run: |
+          echo "Total Go coverage: ${{ steps.coverage.outputs.total }}" >> "${GITHUB_STEP_SUMMARY}"

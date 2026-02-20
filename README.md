@@ -1,8 +1,21 @@
 # codex-ralph
 
+[![Test](https://github.com/emperorhan/codex-ralph/actions/workflows/test.yml/badge.svg)](https://github.com/emperorhan/codex-ralph/actions/workflows/test.yml)
+
 `codex-ralph`는 프로젝트 안에서 `manager / planner / developer / qa` 자율 에이전트 루프를 운영하는 CLI입니다.
 
 이 문서는 **랄프 루프 사용자 관점**에서만 설명합니다.
+
+## 테스트 가시성
+
+- CI 테스트 상태: `Test` 워크플로우 배지(상단)
+- 커버리지 산출물: 각 `Test` 실행의 artifact(`coverage.out`, `coverage.txt`)
+- 로컬 확인:
+
+```bash
+go test ./... -covermode=atomic -coverprofile=coverage.out
+go tool cover -func=coverage.out
+```
 
 ## 세팅
 
@@ -300,3 +313,7 @@ ralphctl --control-dir "$RALPH_CONTROL_DIR" fleet start --all
 ralphctl --control-dir "$RALPH_CONTROL_DIR" fleet status --all
 ralphctl --control-dir "$RALPH_CONTROL_DIR" fleet stop --all
 ```
+
+## License
+
+MIT (`LICENSE`)
