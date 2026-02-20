@@ -21,6 +21,14 @@ const (
 	SetupModeCustom        SetupMode = "custom"
 )
 
+type SetupFlowMode string
+
+const (
+	SetupFlowModeQuickstart SetupFlowMode = "quickstart"
+	SetupFlowModeAdvanced   SetupFlowMode = "advanced"
+	SetupFlowModeRemote     SetupFlowMode = "remote"
+)
+
 type SetupSelections struct {
 	Plugin           string
 	RoleRulesEnabled bool
@@ -29,6 +37,30 @@ type SetupSelections struct {
 	DoctorAutoRepair bool
 	ValidationMode   SetupMode
 	ValidateCmd      string
+}
+
+func NormalizeSetupFlowMode(raw string) SetupFlowMode {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", string(SetupFlowModeAdvanced):
+		return SetupFlowModeAdvanced
+	case string(SetupFlowModeQuickstart):
+		return SetupFlowModeQuickstart
+	case string(SetupFlowModeRemote):
+		return SetupFlowModeRemote
+	default:
+		return ""
+	}
+}
+
+func DefaultSetupSelections(preferredPlugin string) SetupSelections {
+	return SetupSelections{
+		Plugin:           strings.TrimSpace(preferredPlugin),
+		RoleRulesEnabled: true,
+		HandoffRequired:  true,
+		HandoffSchema:    "universal",
+		DoctorAutoRepair: true,
+		ValidationMode:   SetupModePluginDefault,
+	}
 }
 
 func RunSetupWizard(paths Paths, executablePath, preferredPlugin string, in io.Reader, out io.Writer) error {
@@ -216,6 +248,39 @@ func ApplySetupSelections(paths Paths, executablePath string, selections SetupSe
 		return err
 	}
 	return EnsureRoleRuleFiles(paths)
+}
+
+func ApplyRemoteProfilePreset(paths Paths) error {
+	if err := EnsureLayout(paths); err != nil {
+		return err
+	}
+
+	existing := map[string]string{}
+	if _, err := os.Stat(paths.ProfileLocalYAMLFile); err == nil {
+		m, readErr := ReadYAMLFlatMap(paths.ProfileLocalYAMLFile)
+		if readErr != nil {
+			return fmt.Errorf("read profile.local.yaml: %w", readErr)
+		}
+		existing = m
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat profile.local.yaml: %w", err)
+	}
+
+	setProfileConfigValue(existing, "codex_exec_timeout_sec", "1200", "RALPH_CODEX_EXEC_TIMEOUT_SEC")
+	setProfileConfigValue(existing, "codex_retry_max_attempts", "5", "RALPH_CODEX_RETRY_MAX_ATTEMPTS")
+	setProfileConfigValue(existing, "codex_retry_backoff_sec", "15", "RALPH_CODEX_RETRY_BACKOFF_SEC")
+	setProfileConfigValue(existing, "codex_skip_git_repo_check", "true", "RALPH_CODEX_SKIP_GIT_REPO_CHECK")
+	setProfileConfigValue(existing, "codex_output_last_message_enabled", "true", "RALPH_CODEX_OUTPUT_LAST_MESSAGE_ENABLED")
+	setProfileConfigValue(existing, "inprogress_watchdog_enabled", "true", "RALPH_INPROGRESS_WATCHDOG_ENABLED")
+	setProfileConfigValue(existing, "inprogress_watchdog_stale_sec", "1800", "RALPH_INPROGRESS_WATCHDOG_STALE_SEC")
+	setProfileConfigValue(existing, "inprogress_watchdog_scan_loops", "1", "RALPH_INPROGRESS_WATCHDOG_SCAN_LOOPS")
+	setProfileConfigValue(existing, "supervisor_enabled", "true", "RALPH_SUPERVISOR_ENABLED")
+	setProfileConfigValue(existing, "supervisor_restart_delay_sec", "5", "RALPH_SUPERVISOR_RESTART_DELAY_SEC")
+
+	if err := WriteYAMLFlatMap(paths.ProfileLocalYAMLFile, existing); err != nil {
+		return fmt.Errorf("write profile.local.yaml: %w", err)
+	}
+	return pruneLegacySetupEnvOverrides(paths.ProfileLocalFile)
 }
 
 func pickDefaultPlugin(plugins []string, current string) string {

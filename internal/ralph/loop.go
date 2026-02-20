@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +38,9 @@ func RunLoop(ctx context.Context, paths Paths, profile Profile, opts RunOptions)
 	if err := EnsureLayout(paths); err != nil {
 		return err
 	}
+	if err := preflightLoopPermissions(paths); err != nil {
+		return err
+	}
 
 	if opts.Stdout == nil {
 		opts.Stdout = os.Stdout
@@ -57,6 +61,11 @@ func RunLoop(ctx context.Context, paths Paths, profile Profile, opts RunOptions)
 	busyState, err := LoadBusyWaitState(paths)
 	if err != nil {
 		return err
+	}
+	profileReloadState, err := LoadProfileReloadState(paths)
+	if err != nil {
+		fmt.Fprintf(opts.Stdout, "[ralph-loop] warning: failed to load profile reload state: %v\n", err)
+		profileReloadState = ProfileReloadState{}
 	}
 
 	roleScope := RoleSetCSV(opts.AllowedRoles)
@@ -84,6 +93,8 @@ func RunLoop(ctx context.Context, paths Paths, profile Profile, opts RunOptions)
 	loopCount := 0
 	idleCount := 0
 	tickCount := 0
+	permissionErrStreak := 0
+	activeProfile := profile
 
 	for {
 		select {
@@ -102,8 +113,24 @@ func RunLoop(ctx context.Context, paths Paths, profile Profile, opts RunOptions)
 			fmt.Fprintln(opts.Stdout, "[ralph-loop] disabled; stopping")
 			return nil
 		}
-		if busyWaitOwner && profile.InProgressWatchdogEnabled && shouldRunWatchdogScan(tickCount, profile.InProgressWatchdogScanLoops) {
-			recovered, watchdogErr := RecoverStaleInProgressWithCount(paths, time.Duration(profile.InProgressWatchdogStaleSec)*time.Second)
+		reloadedProfile, changed, reloadErr := reloadLoopProfile(paths, activeProfile)
+		if reloadErr != nil {
+			fmt.Fprintf(opts.Stdout, "[ralph-loop] warning: profile reload failed; using previous settings: %v\n", reloadErr)
+		} else {
+			if changed {
+				summary := profileReloadSummary(reloadedProfile)
+				fmt.Fprintf(opts.Stdout, "[ralph-loop] profile reloaded: %s\n", summary)
+				profileReloadState.LastReloadAt = time.Now().UTC()
+				profileReloadState.ReloadCount++
+				profileReloadState.LastSummary = summary
+				if err := SaveProfileReloadState(paths, profileReloadState); err != nil {
+					fmt.Fprintf(opts.Stdout, "[ralph-loop] warning: failed to save profile reload state: %v\n", err)
+				}
+			}
+			activeProfile = reloadedProfile
+		}
+		if busyWaitOwner && activeProfile.InProgressWatchdogEnabled && shouldRunWatchdogScan(tickCount, activeProfile.InProgressWatchdogScanLoops) {
+			recovered, watchdogErr := RecoverStaleInProgressWithCount(paths, time.Duration(activeProfile.InProgressWatchdogStaleSec)*time.Second)
 			if watchdogErr != nil {
 				fmt.Fprintf(opts.Stdout, "[ralph-loop] warning: in-progress watchdog failed: %v\n", watchdogErr)
 				_ = AppendBusyWaitEvent(paths, BusyWaitEvent{
@@ -120,7 +147,7 @@ func RunLoop(ctx context.Context, paths Paths, profile Profile, opts RunOptions)
 					LoopCount:      loopCount,
 					RecoveredCount: recovered,
 					Result:         "recovered",
-					Detail:         fmt.Sprintf("stale_sec=%d; role_scope=%s", profile.InProgressWatchdogStaleSec, roleScopeOrAll(roleScope)),
+					Detail:         fmt.Sprintf("stale_sec=%d; role_scope=%s", activeProfile.InProgressWatchdogStaleSec, roleScopeOrAll(roleScope)),
 				})
 			}
 		}
@@ -138,8 +165,8 @@ func RunLoop(ctx context.Context, paths Paths, profile Profile, opts RunOptions)
 			if len(opts.AllowedRoles) > 0 {
 				globalReady, _ := CountReadyIssues(paths)
 				if globalReady > 0 {
-					fmt.Fprintf(opts.Stdout, "[ralph-loop] no ready issues for roles=%s; global_ready=%d; sleeping %ds\n", roleScope, globalReady, profile.IdleSleepSec)
-					if err := sleepOrCancel(ctx, time.Duration(profile.IdleSleepSec)*time.Second); err != nil {
+					fmt.Fprintf(opts.Stdout, "[ralph-loop] no ready issues for roles=%s; global_ready=%d; sleeping %ds\n", roleScope, globalReady, activeProfile.IdleSleepSec)
+					if err := sleepOrCancel(ctx, time.Duration(activeProfile.IdleSleepSec)*time.Second); err != nil {
 						return nil
 					}
 					continue
@@ -148,7 +175,7 @@ func RunLoop(ctx context.Context, paths Paths, profile Profile, opts RunOptions)
 
 			idleCount++
 
-			if busyWaitOwner && profile.BusyWaitDetectLoops > 0 && idleCount >= profile.BusyWaitDetectLoops && idleCount%profile.BusyWaitDetectLoops == 0 {
+			if busyWaitOwner && activeProfile.BusyWaitDetectLoops > 0 && idleCount >= activeProfile.BusyWaitDetectLoops && idleCount%activeProfile.BusyWaitDetectLoops == 0 {
 				now := time.Now().UTC()
 				readyBefore, _ := CountReadyIssues(paths)
 				inProgressBefore, _ := CountIssueFiles(paths.InProgressDir)
@@ -171,10 +198,10 @@ func RunLoop(ctx context.Context, paths Paths, profile Profile, opts RunOptions)
 					fmt.Fprintf(opts.Stdout, "[ralph-loop] warning: failed to append busywait event: %v\n", err)
 				}
 
-				if profile.BusyWaitSelfHealEnabled {
-					canHeal, skipReason := canRunBusyWaitSelfHeal(now, busyState, profile)
+				if activeProfile.BusyWaitSelfHealEnabled {
+					canHeal, skipReason := canRunBusyWaitSelfHeal(now, busyState, activeProfile)
 					if canHeal {
-						heal := executeBusyWaitSelfHeal(ctx, paths, profile)
+						heal := executeBusyWaitSelfHeal(ctx, paths, activeProfile)
 						busyState.LastSelfHealAt = now
 						busyState.SelfHealAttempts++
 						busyState.LastSelfHealResult = heal.Result
@@ -238,27 +265,79 @@ func RunLoop(ctx context.Context, paths Paths, profile Profile, opts RunOptions)
 				}
 			}
 
-			if profile.ExitOnIdle {
+			if activeProfile.ExitOnIdle {
 				fmt.Fprintln(opts.Stdout, "[ralph-loop] no ready issues; exit_on_idle=true")
 				return nil
 			}
-			if profile.NoReadyMaxLoops > 0 && idleCount >= profile.NoReadyMaxLoops {
-				fmt.Fprintf(opts.Stdout, "[ralph-loop] no ready issues; reached no_ready_max_loops=%d\n", profile.NoReadyMaxLoops)
+			if activeProfile.NoReadyMaxLoops > 0 && idleCount >= activeProfile.NoReadyMaxLoops {
+				fmt.Fprintf(opts.Stdout, "[ralph-loop] no ready issues; reached no_ready_max_loops=%d\n", activeProfile.NoReadyMaxLoops)
 				return nil
 			}
-			fmt.Fprintf(opts.Stdout, "[ralph-loop] no ready issues; sleeping %ds\n", profile.IdleSleepSec)
-			if err := sleepOrCancel(ctx, time.Duration(profile.IdleSleepSec)*time.Second); err != nil {
+			fmt.Fprintf(opts.Stdout, "[ralph-loop] no ready issues; sleeping %ds\n", activeProfile.IdleSleepSec)
+			if err := sleepOrCancel(ctx, time.Duration(activeProfile.IdleSleepSec)*time.Second); err != nil {
 				return nil
 			}
 			continue
 		}
 		idleCount = 0
 
-		if err := processIssue(ctx, paths, profile, issuePath, meta, opts.Stdout); err != nil {
+		if err := processIssue(ctx, paths, activeProfile, issuePath, meta, opts.Stdout); err != nil {
 			fmt.Fprintf(opts.Stdout, "[ralph-loop] issue processing error: %v\n", err)
+			if isLikelyPermissionErr(err) {
+				permissionErrStreak++
+				waitSec := permissionErrorBackoffSec(activeProfile.IdleSleepSec, permissionErrStreak)
+				if appendErr := AppendBusyWaitEvent(paths, BusyWaitEvent{
+					Type:      "process_permission_error",
+					LoopCount: loopCount,
+					Result:    "detected",
+					Error:     err.Error(),
+					Detail:    fmt.Sprintf("streak=%d; wait_sec=%d; role_scope=%s", permissionErrStreak, waitSec, roleScopeOrAll(roleScope)),
+				}); appendErr != nil {
+					fmt.Fprintf(opts.Stdout, "[ralph-loop] warning: failed to append permission-error event: %v\n", appendErr)
+				}
+				fmt.Fprintf(opts.Stdout, "[ralph-loop] permission-related failure detected (streak=%d); sleeping %ds and retrying. hint: ralphctl --control-dir %s --project-dir %s doctor --repair\n", permissionErrStreak, waitSec, paths.ControlDir, paths.ProjectDir)
+				if err := sleepOrCancel(ctx, time.Duration(waitSec)*time.Second); err != nil {
+					return nil
+				}
+			} else {
+				permissionErrStreak = 0
+			}
+		} else {
+			permissionErrStreak = 0
 		}
 		loopCount++
 	}
+}
+
+func reloadLoopProfile(paths Paths, current Profile) (Profile, bool, error) {
+	next, err := LoadProfile(paths)
+	if err != nil {
+		return current, false, err
+	}
+	if reflect.DeepEqual(current, next) {
+		return current, false, nil
+	}
+	return next, true, nil
+}
+
+func profileReloadSummary(p Profile) string {
+	globalModel := strings.TrimSpace(p.CodexModel)
+	if globalModel == "" || normalizeCodexModelForExec(globalModel) == "" {
+		globalModel = "auto"
+	}
+	developerModel := strings.TrimSpace(p.CodexModelDeveloper)
+	if developerModel == "" {
+		developerModel = "(inherit)"
+	}
+	return fmt.Sprintf(
+		"plugin=%s codex_model=%s codex_model_developer=%s idle_sleep_sec=%d retry=%d timeout=%ds",
+		p.PluginName,
+		globalModel,
+		developerModel,
+		p.IdleSleepSec,
+		p.CodexRetryMaxAttempts,
+		p.CodexExecTimeoutSec,
+	)
 }
 
 func roleScopeOrAll(scope string) string {
@@ -343,10 +422,27 @@ func runCodexAndValidate(ctx context.Context, paths Paths, profile Profile, inPr
 
 	requireHandoff := profile.HandoffRequired && profile.RequireCodex
 	prompt := buildCodexPrompt(paths.ProjectDir, string(issueBytes), meta, handoffPath, ruleBundle, profile.RoleRulesEnabled, requireHandoff, profile.HandoffSchema)
+	lastMessagePath := ""
+	if profile.CodexOutputLastMessage {
+		lastMessagePath = codexLastMessagePath(logPath)
+	}
 
 	if profile.RequireCodex {
-		if err := runCodexWithRetries(ctx, paths, profile, prompt, logFile); err != nil {
+		model := profile.CodexModelForRole(meta.Role)
+		modelLabel := model
+		if strings.TrimSpace(modelLabel) == "" {
+			modelLabel = "auto(codex default)"
+		}
+		_, _ = fmt.Fprintf(logFile, "[ralph] codex role=%s model=%s\n", meta.Role, modelLabel)
+		if err := runCodexWithRetries(ctx, paths, profile, model, prompt, logFile, lastMessagePath); err != nil {
 			return err
+		}
+		if lastMessagePath != "" {
+			if _, err := os.Stat(lastMessagePath); err == nil {
+				_, _ = fmt.Fprintf(logFile, "[ralph] codex last message saved: %s\n", lastMessagePath)
+			} else {
+				_, _ = fmt.Fprintf(logFile, "[ralph] warning: codex last message file not found: %s\n", lastMessagePath)
+			}
 		}
 	} else {
 		_, _ = fmt.Fprintln(logFile, "codex execution skipped (RALPH_REQUIRE_CODEX=false)")
@@ -402,7 +498,7 @@ func shouldValidate(profile Profile, role string) bool {
 	return ok
 }
 
-func runCodexWithRetries(ctx context.Context, paths Paths, profile Profile, prompt string, logFile *os.File) error {
+func runCodexWithRetries(ctx context.Context, paths Paths, profile Profile, model, prompt string, logFile *os.File, lastMessagePath string) error {
 	attempts := profile.CodexRetryMaxAttempts
 	if attempts <= 0 {
 		attempts = 1
@@ -415,7 +511,7 @@ func runCodexWithRetries(ctx context.Context, paths Paths, profile Profile, prom
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
 		_, _ = fmt.Fprintf(logFile, "[ralph] codex attempt %d/%d\n", attempt, attempts)
-		err, retryable := runSingleCodexAttempt(ctx, paths, profile, prompt, logFile)
+		err, retryable := runSingleCodexAttempt(ctx, paths, profile, model, prompt, logFile, lastMessagePath)
 		if err == nil {
 			return nil
 		}
@@ -441,7 +537,7 @@ func runCodexWithRetries(ctx context.Context, paths Paths, profile Profile, prom
 	return lastErr
 }
 
-func runSingleCodexAttempt(ctx context.Context, paths Paths, profile Profile, prompt string, logFile *os.File) (error, bool) {
+func runSingleCodexAttempt(ctx context.Context, paths Paths, profile Profile, model, prompt string, logFile *os.File, lastMessagePath string) (error, bool) {
 	cmdCtx := ctx
 	cancel := func() {}
 	if profile.CodexExecTimeoutSec > 0 {
@@ -449,17 +545,29 @@ func runSingleCodexAttempt(ctx context.Context, paths Paths, profile Profile, pr
 	}
 	defer cancel()
 
-	codexCmd := exec.CommandContext(cmdCtx,
-		"codex",
+	args := []string{
 		"--ask-for-approval", profile.CodexApproval,
 		"exec",
-		"--model", profile.CodexModel,
 		"--sandbox", profile.CodexSandbox,
 		"--cd", paths.ProjectDir,
-		prompt,
-	)
-	codexCmd.Stdout = logFile
-	codexCmd.Stderr = logFile
+	}
+	if strings.TrimSpace(model) != "" {
+		args = append(args, "--model", model)
+	}
+	if profile.CodexSkipGitRepoCheck {
+		args = append(args, "--skip-git-repo-check")
+	}
+	if strings.TrimSpace(lastMessagePath) != "" {
+		args = append(args, "--output-last-message", lastMessagePath)
+	}
+	// Use stdin prompt to avoid argv length limits for large issue/rule payloads.
+	args = append(args, "-")
+
+	codexCmd := exec.CommandContext(cmdCtx, "codex", args...)
+	tail := newTailBuffer(64 * 1024)
+	codexCmd.Stdout = io.MultiWriter(logFile, tail)
+	codexCmd.Stderr = io.MultiWriter(logFile, tail)
+	codexCmd.Stdin = strings.NewReader(prompt)
 	runErr := codexCmd.Run()
 	if runErr == nil {
 		return nil, false
@@ -473,7 +581,185 @@ func runSingleCodexAttempt(ctx context.Context, paths Paths, profile Profile, pr
 	}
 
 	code := exitCode(runErr)
+	if reason, retryable := classifyCodexFailure(code, strings.ToLower(tail.String())); !retryable {
+		_, _ = fmt.Fprintf(logFile, "[ralph] codex non-retryable failure: %s (rc=%d)\n", reason, code)
+		return fmt.Errorf("%s", reason), false
+	}
 	return fmt.Errorf("codex_exit_%d", code), code != 130
+}
+
+func codexLastMessagePath(logPath string) string {
+	base := strings.TrimSuffix(logPath, filepath.Ext(logPath))
+	if base == "" {
+		base = logPath
+	}
+	return base + ".last.txt"
+}
+
+func preflightLoopPermissions(paths Paths) error {
+	dirs := []struct {
+		name string
+		path string
+	}{
+		{name: "project-dir", path: paths.ProjectDir},
+		{name: "control-dir", path: paths.ControlDir},
+		{name: "issues-dir", path: paths.IssuesDir},
+		{name: "in-progress-dir", path: paths.InProgressDir},
+		{name: "blocked-dir", path: paths.BlockedDir},
+		{name: "done-dir", path: paths.DoneDir},
+		{name: "logs-dir", path: paths.LogsDir},
+	}
+	for _, d := range dirs {
+		if err := ensureDirWritable(d.path); err != nil {
+			return fmt.Errorf("permission preflight failed for %s (%s): %w", d.name, d.path, err)
+		}
+	}
+	return nil
+}
+
+func ensureDirWritable(dir string) error {
+	if strings.TrimSpace(dir) == "" {
+		return fmt.Errorf("empty path")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".ralph-loop-write-check-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	return nil
+}
+
+func classifyCodexFailure(exitCode int, outputLower string) (string, bool) {
+	if exitCode == 130 {
+		return "codex_canceled", false
+	}
+
+	authMarkers := []string{
+		"not logged in",
+		"run: codex login",
+		"authentication",
+		"unauthorized",
+		"forbidden",
+		"invalid api key",
+	}
+	if hasAnySubstring(outputLower, authMarkers...) {
+		return "codex_auth_error", false
+	}
+
+	argMarkers := []string{
+		"unknown option",
+		"unknown argument",
+		"invalid value",
+		"error parsing",
+	}
+	if hasAnySubstring(outputLower, argMarkers...) {
+		return "codex_invalid_args", false
+	}
+
+	modelMarkers := []string{
+		"unknown model",
+		"model not found",
+		"model does not exist",
+		"invalid model",
+	}
+	if hasAnySubstring(outputLower, modelMarkers...) {
+		return "codex_model_error", false
+	}
+
+	permissionMarkers := []string{
+		"permission denied",
+		"operation not permitted",
+		"approval required",
+		"sandbox blocked",
+	}
+	if hasAnySubstring(outputLower, permissionMarkers...) {
+		return "codex_permission_denied", false
+	}
+
+	return "", true
+}
+
+func hasAnySubstring(s string, patterns ...string) bool {
+	for _, p := range patterns {
+		if p != "" && strings.Contains(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLikelyPermissionErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return hasAnySubstring(msg,
+		"permission denied",
+		"operation not permitted",
+		"read-only file system",
+		"sandbox blocked",
+		"approval required",
+	)
+}
+
+func permissionErrorBackoffSec(idleSleepSec, streak int) int {
+	base := idleSleepSec
+	if base < 5 {
+		base = 5
+	}
+	if streak <= 1 {
+		return base
+	}
+	wait := base
+	for i := 1; i < streak; i++ {
+		if wait >= 300 {
+			return 300
+		}
+		wait *= 2
+	}
+	if wait > 300 {
+		return 300
+	}
+	return wait
+}
+
+type tailBuffer struct {
+	max  int
+	data []byte
+}
+
+func newTailBuffer(max int) *tailBuffer {
+	if max <= 0 {
+		max = 4096
+	}
+	return &tailBuffer{max: max}
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	if len(p) >= b.max {
+		b.data = append(b.data[:0], p[len(p)-b.max:]...)
+		return len(p), nil
+	}
+
+	overflow := len(b.data) + len(p) - b.max
+	if overflow > 0 {
+		copy(b.data, b.data[overflow:])
+		b.data = b.data[:len(b.data)-overflow]
+	}
+	b.data = append(b.data, p...)
+	return len(p), nil
+}
+
+func (b *tailBuffer) String() string {
+	return string(b.data)
 }
 
 func codexRetryBackoff(baseSec, attempt int) int {

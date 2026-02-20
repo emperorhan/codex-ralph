@@ -10,8 +10,14 @@ import (
 type Profile struct {
 	PluginName                  string
 	CodexModel                  string
+	CodexModelManager           string
+	CodexModelPlanner           string
+	CodexModelDeveloper         string
+	CodexModelQA                string
 	CodexSandbox                string
 	CodexApproval               string
+	CodexSkipGitRepoCheck       bool
+	CodexOutputLastMessage      bool
 	CodexExecTimeoutSec         int
 	CodexRetryMaxAttempts       int
 	CodexRetryBackoffSec        int
@@ -39,20 +45,22 @@ type Profile struct {
 
 func DefaultProfile() Profile {
 	return Profile{
-		PluginName:            "universal-default",
-		CodexModel:            "gpt-5.3-codex",
-		CodexSandbox:          "workspace-write",
-		CodexApproval:         "never",
-		CodexExecTimeoutSec:   900,
-		CodexRetryMaxAttempts: 3,
-		CodexRetryBackoffSec:  10,
-		RequireCodex:          true,
-		RoleRulesEnabled:      true,
-		HandoffRequired:       true,
-		HandoffSchema:         "universal",
-		IdleSleepSec:          20,
-		ExitOnIdle:            false,
-		NoReadyMaxLoops:       0,
+		PluginName:             "universal-default",
+		CodexModel:             "auto",
+		CodexSandbox:           "workspace-write",
+		CodexApproval:          "never",
+		CodexSkipGitRepoCheck:  true,
+		CodexOutputLastMessage: true,
+		CodexExecTimeoutSec:    900,
+		CodexRetryMaxAttempts:  3,
+		CodexRetryBackoffSec:   10,
+		RequireCodex:           true,
+		RoleRulesEnabled:       true,
+		HandoffRequired:        true,
+		HandoffSchema:          "universal",
+		IdleSleepSec:           20,
+		ExitOnIdle:             false,
+		NoReadyMaxLoops:        0,
 		ValidateRoles: map[string]struct{}{
 			"developer": {},
 			"qa":        {},
@@ -93,7 +101,7 @@ func LoadProfile(paths Paths) (Profile, error) {
 		p.IdleSleepSec = 20
 	}
 	if p.CodexModel == "" {
-		p.CodexModel = "gpt-5.3-codex"
+		p.CodexModel = "auto"
 	}
 	if p.CodexSandbox == "" {
 		p.CodexSandbox = "workspace-write"
@@ -206,10 +214,22 @@ func profileConfigEnvKey(rawKey string) string {
 		return "RALPH_PLUGIN_NAME"
 	case "codex_model", "codex.model":
 		return "RALPH_CODEX_MODEL"
+	case "codex_model_manager", "codex.model_manager":
+		return "RALPH_CODEX_MODEL_MANAGER"
+	case "codex_model_planner", "codex.model_planner":
+		return "RALPH_CODEX_MODEL_PLANNER"
+	case "codex_model_developer", "codex.model_developer":
+		return "RALPH_CODEX_MODEL_DEVELOPER"
+	case "codex_model_qa", "codex.model_qa":
+		return "RALPH_CODEX_MODEL_QA"
 	case "codex_sandbox", "codex.sandbox":
 		return "RALPH_CODEX_SANDBOX"
 	case "codex_approval", "codex.approval":
 		return "RALPH_CODEX_APPROVAL"
+	case "codex_skip_git_repo_check", "codex.skip_git_repo_check":
+		return "RALPH_CODEX_SKIP_GIT_REPO_CHECK"
+	case "codex_output_last_message", "codex.output_last_message", "codex_output_last_message_enabled", "codex.output_last_message_enabled":
+		return "RALPH_CODEX_OUTPUT_LAST_MESSAGE_ENABLED"
 	case "codex_exec_timeout_sec", "codex.exec_timeout_sec":
 		return "RALPH_CODEX_EXEC_TIMEOUT_SEC"
 	case "codex_retry_max_attempts", "codex.retry_max_attempts":
@@ -269,35 +289,50 @@ func normalizeConfigKey(raw string) string {
 }
 
 func ProfileToYAMLMap(p Profile) map[string]string {
-	return map[string]string{
-		"plugin_name":                     p.PluginName,
-		"codex_model":                     p.CodexModel,
-		"codex_sandbox":                   p.CodexSandbox,
-		"codex_approval":                  p.CodexApproval,
-		"codex_exec_timeout_sec":          strconv.Itoa(p.CodexExecTimeoutSec),
-		"codex_retry_max_attempts":        strconv.Itoa(p.CodexRetryMaxAttempts),
-		"codex_retry_backoff_sec":         strconv.Itoa(p.CodexRetryBackoffSec),
-		"require_codex":                   boolToEnv(p.RequireCodex),
-		"role_rules_enabled":              boolToEnv(p.RoleRulesEnabled),
-		"handoff_required":                boolToEnv(p.HandoffRequired),
-		"handoff_schema":                  normalizeHandoffSchema(p.HandoffSchema),
-		"idle_sleep_sec":                  strconv.Itoa(p.IdleSleepSec),
-		"exit_on_idle":                    boolToEnv(p.ExitOnIdle),
-		"no_ready_max_loops":              strconv.Itoa(p.NoReadyMaxLoops),
-		"validate_roles":                  RoleSetCSV(p.ValidateRoles),
-		"validate_cmd":                    p.ValidateCmd,
-		"busywait_detect_loops":           strconv.Itoa(p.BusyWaitDetectLoops),
-		"busywait_self_heal_enabled":      boolToEnv(p.BusyWaitSelfHealEnabled),
-		"busywait_doctor_repair_enabled":  boolToEnv(p.BusyWaitDoctorRepairEnabled),
-		"busywait_self_heal_cooldown_sec": strconv.Itoa(p.BusyWaitSelfHealCooldownSec),
-		"busywait_self_heal_max_attempts": strconv.Itoa(p.BusyWaitSelfHealMaxAttempts),
-		"busywait_self_heal_cmd":          p.BusyWaitSelfHealCmd,
-		"inprogress_watchdog_enabled":     boolToEnv(p.InProgressWatchdogEnabled),
-		"inprogress_watchdog_stale_sec":   strconv.Itoa(p.InProgressWatchdogStaleSec),
-		"inprogress_watchdog_scan_loops":  strconv.Itoa(p.InProgressWatchdogScanLoops),
-		"supervisor_enabled":              boolToEnv(p.SupervisorEnabled),
-		"supervisor_restart_delay_sec":    strconv.Itoa(p.SupervisorRestartDelaySec),
+	out := map[string]string{
+		"plugin_name":                       p.PluginName,
+		"codex_model":                       p.CodexModel,
+		"codex_sandbox":                     p.CodexSandbox,
+		"codex_approval":                    p.CodexApproval,
+		"codex_skip_git_repo_check":         boolToEnv(p.CodexSkipGitRepoCheck),
+		"codex_output_last_message_enabled": boolToEnv(p.CodexOutputLastMessage),
+		"codex_exec_timeout_sec":            strconv.Itoa(p.CodexExecTimeoutSec),
+		"codex_retry_max_attempts":          strconv.Itoa(p.CodexRetryMaxAttempts),
+		"codex_retry_backoff_sec":           strconv.Itoa(p.CodexRetryBackoffSec),
+		"require_codex":                     boolToEnv(p.RequireCodex),
+		"role_rules_enabled":                boolToEnv(p.RoleRulesEnabled),
+		"handoff_required":                  boolToEnv(p.HandoffRequired),
+		"handoff_schema":                    normalizeHandoffSchema(p.HandoffSchema),
+		"idle_sleep_sec":                    strconv.Itoa(p.IdleSleepSec),
+		"exit_on_idle":                      boolToEnv(p.ExitOnIdle),
+		"no_ready_max_loops":                strconv.Itoa(p.NoReadyMaxLoops),
+		"validate_roles":                    RoleSetCSV(p.ValidateRoles),
+		"validate_cmd":                      p.ValidateCmd,
+		"busywait_detect_loops":             strconv.Itoa(p.BusyWaitDetectLoops),
+		"busywait_self_heal_enabled":        boolToEnv(p.BusyWaitSelfHealEnabled),
+		"busywait_doctor_repair_enabled":    boolToEnv(p.BusyWaitDoctorRepairEnabled),
+		"busywait_self_heal_cooldown_sec":   strconv.Itoa(p.BusyWaitSelfHealCooldownSec),
+		"busywait_self_heal_max_attempts":   strconv.Itoa(p.BusyWaitSelfHealMaxAttempts),
+		"busywait_self_heal_cmd":            p.BusyWaitSelfHealCmd,
+		"inprogress_watchdog_enabled":       boolToEnv(p.InProgressWatchdogEnabled),
+		"inprogress_watchdog_stale_sec":     strconv.Itoa(p.InProgressWatchdogStaleSec),
+		"inprogress_watchdog_scan_loops":    strconv.Itoa(p.InProgressWatchdogScanLoops),
+		"supervisor_enabled":                boolToEnv(p.SupervisorEnabled),
+		"supervisor_restart_delay_sec":      strconv.Itoa(p.SupervisorRestartDelaySec),
 	}
+	if v := strings.TrimSpace(p.CodexModelManager); v != "" {
+		out["codex_model_manager"] = v
+	}
+	if v := strings.TrimSpace(p.CodexModelPlanner); v != "" {
+		out["codex_model_planner"] = v
+	}
+	if v := strings.TrimSpace(p.CodexModelDeveloper); v != "" {
+		out["codex_model_developer"] = v
+	}
+	if v := strings.TrimSpace(p.CodexModelQA); v != "" {
+		out["codex_model_qa"] = v
+	}
+	return out
 }
 
 func applyProfileMap(p *Profile, m map[string]string) {
@@ -307,11 +342,29 @@ func applyProfileMap(p *Profile, m map[string]string) {
 	if v := m["RALPH_CODEX_MODEL"]; v != "" {
 		p.CodexModel = v
 	}
+	if v := m["RALPH_CODEX_MODEL_MANAGER"]; v != "" {
+		p.CodexModelManager = v
+	}
+	if v := m["RALPH_CODEX_MODEL_PLANNER"]; v != "" {
+		p.CodexModelPlanner = v
+	}
+	if v := m["RALPH_CODEX_MODEL_DEVELOPER"]; v != "" {
+		p.CodexModelDeveloper = v
+	}
+	if v := m["RALPH_CODEX_MODEL_QA"]; v != "" {
+		p.CodexModelQA = v
+	}
 	if v := m["RALPH_CODEX_SANDBOX"]; v != "" {
 		p.CodexSandbox = v
 	}
 	if v := m["RALPH_CODEX_APPROVAL"]; v != "" {
 		p.CodexApproval = v
+	}
+	if v, ok := parseBool(m["RALPH_CODEX_SKIP_GIT_REPO_CHECK"]); ok {
+		p.CodexSkipGitRepoCheck = v
+	}
+	if v, ok := parseBool(m["RALPH_CODEX_OUTPUT_LAST_MESSAGE_ENABLED"]); ok {
+		p.CodexOutputLastMessage = v
 	}
 	if v, ok := parseInt(m["RALPH_CODEX_EXEC_TIMEOUT_SEC"]); ok {
 		p.CodexExecTimeoutSec = v
@@ -437,5 +490,37 @@ func normalizeHandoffSchema(raw string) string {
 		return "universal"
 	default:
 		return "universal"
+	}
+}
+
+func (p Profile) CodexModelForRole(role string) string {
+	switch strings.TrimSpace(role) {
+	case "manager":
+		if v := strings.TrimSpace(p.CodexModelManager); v != "" {
+			return normalizeCodexModelForExec(v)
+		}
+	case "planner":
+		if v := strings.TrimSpace(p.CodexModelPlanner); v != "" {
+			return normalizeCodexModelForExec(v)
+		}
+	case "developer":
+		if v := strings.TrimSpace(p.CodexModelDeveloper); v != "" {
+			return normalizeCodexModelForExec(v)
+		}
+	case "qa":
+		if v := strings.TrimSpace(p.CodexModelQA); v != "" {
+			return normalizeCodexModelForExec(v)
+		}
+	}
+	return normalizeCodexModelForExec(p.CodexModel)
+}
+
+func normalizeCodexModelForExec(raw string) string {
+	v := strings.TrimSpace(raw)
+	switch strings.ToLower(v) {
+	case "", "auto", "default", "codex-default":
+		return ""
+	default:
+		return v
 	}
 }

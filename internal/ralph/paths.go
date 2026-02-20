@@ -7,30 +7,31 @@ import (
 )
 
 type Paths struct {
-	ControlDir           string
-	ProjectDir           string
-	RalphDir             string
-	RulesDir             string
-	IssuesDir            string
-	InProgressDir        string
-	DoneDir              string
-	BlockedDir           string
-	ReportsDir           string
-	HandoffsDir          string
-	LogsDir              string
-	StateFile            string
-	ProfileFile          string
-	ProfileLocalFile     string
-	ProfileYAMLFile      string
-	ProfileLocalYAMLFile string
-	CommonRulesFile      string
-	IssueTemplateFile    string
-	PIDFile              string
-	RunnerLogFile        string
-	BusyWaitStateFile    string
-	BusyWaitEventsFile   string
-	ProgressJournal      string
-	AgentSetFile         string
+	ControlDir             string
+	ProjectDir             string
+	RalphDir               string
+	RulesDir               string
+	IssuesDir              string
+	InProgressDir          string
+	DoneDir                string
+	BlockedDir             string
+	ReportsDir             string
+	HandoffsDir            string
+	LogsDir                string
+	StateFile              string
+	ProfileFile            string
+	ProfileLocalFile       string
+	ProfileYAMLFile        string
+	ProfileLocalYAMLFile   string
+	CommonRulesFile        string
+	IssueTemplateFile      string
+	PIDFile                string
+	RunnerLogFile          string
+	BusyWaitStateFile      string
+	ProfileReloadStateFile string
+	BusyWaitEventsFile     string
+	ProgressJournal        string
+	AgentSetFile           string
 }
 
 func NewPaths(controlDir, projectDir string) (Paths, error) {
@@ -54,30 +55,31 @@ func NewPaths(controlDir, projectDir string) (Paths, error) {
 	rulesDir := filepath.Join(ralphDir, "rules")
 	reportsDir := filepath.Join(ralphDir, "reports")
 	return Paths{
-		ControlDir:           absControl,
-		ProjectDir:           absProject,
-		RalphDir:             ralphDir,
-		RulesDir:             rulesDir,
-		IssuesDir:            filepath.Join(ralphDir, "issues"),
-		InProgressDir:        filepath.Join(ralphDir, "in-progress"),
-		DoneDir:              filepath.Join(ralphDir, "done"),
-		BlockedDir:           filepath.Join(ralphDir, "blocked"),
-		ReportsDir:           reportsDir,
-		HandoffsDir:          filepath.Join(reportsDir, "handoffs"),
-		LogsDir:              filepath.Join(ralphDir, "logs"),
-		StateFile:            filepath.Join(ralphDir, "state.env"),
-		ProfileFile:          filepath.Join(ralphDir, "profile.env"),
-		ProfileLocalFile:     filepath.Join(ralphDir, "profile.local.env"),
-		ProfileYAMLFile:      filepath.Join(ralphDir, "profile.yaml"),
-		ProfileLocalYAMLFile: filepath.Join(ralphDir, "profile.local.yaml"),
-		CommonRulesFile:      filepath.Join(rulesDir, "common.md"),
-		IssueTemplateFile:    filepath.Join(ralphDir, "issue-template.md"),
-		PIDFile:              filepath.Join(ralphDir, "runner.pid"),
-		RunnerLogFile:        filepath.Join(ralphDir, "logs", "runner.out"),
-		BusyWaitStateFile:    filepath.Join(ralphDir, "state.busywait.env"),
-		BusyWaitEventsFile:   filepath.Join(ralphDir, "reports", "busywait-events.jsonl"),
-		ProgressJournal:      filepath.Join(ralphDir, "reports", "progress-journal.log"),
-		AgentSetFile:         filepath.Join(ralphDir, "agent-set.env"),
+		ControlDir:             absControl,
+		ProjectDir:             absProject,
+		RalphDir:               ralphDir,
+		RulesDir:               rulesDir,
+		IssuesDir:              filepath.Join(ralphDir, "issues"),
+		InProgressDir:          filepath.Join(ralphDir, "in-progress"),
+		DoneDir:                filepath.Join(ralphDir, "done"),
+		BlockedDir:             filepath.Join(ralphDir, "blocked"),
+		ReportsDir:             reportsDir,
+		HandoffsDir:            filepath.Join(reportsDir, "handoffs"),
+		LogsDir:                filepath.Join(ralphDir, "logs"),
+		StateFile:              filepath.Join(ralphDir, "state.env"),
+		ProfileFile:            filepath.Join(ralphDir, "profile.env"),
+		ProfileLocalFile:       filepath.Join(ralphDir, "profile.local.env"),
+		ProfileYAMLFile:        filepath.Join(ralphDir, "profile.yaml"),
+		ProfileLocalYAMLFile:   filepath.Join(ralphDir, "profile.local.yaml"),
+		CommonRulesFile:        filepath.Join(rulesDir, "common.md"),
+		IssueTemplateFile:      filepath.Join(ralphDir, "issue-template.md"),
+		PIDFile:                filepath.Join(ralphDir, "runner.pid"),
+		RunnerLogFile:          filepath.Join(ralphDir, "logs", "runner.out"),
+		BusyWaitStateFile:      filepath.Join(ralphDir, "state.busywait.env"),
+		ProfileReloadStateFile: filepath.Join(ralphDir, "state.profile-reload.env"),
+		BusyWaitEventsFile:     filepath.Join(ralphDir, "reports", "busywait-events.jsonl"),
+		ProgressJournal:        filepath.Join(ralphDir, "reports", "progress-journal.log"),
+		AgentSetFile:           filepath.Join(ralphDir, "agent-set.env"),
 	}, nil
 }
 

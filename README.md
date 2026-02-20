@@ -1,21 +1,6 @@
 # codex-ralph
 
-[![Test](https://github.com/emperorhan/codex-ralph/actions/workflows/test.yml/badge.svg)](https://github.com/emperorhan/codex-ralph/actions/workflows/test.yml)
-
 `codex-ralph`는 프로젝트 안에서 `manager / planner / developer / qa` 자율 에이전트 루프를 운영하는 CLI입니다.
-
-이 문서는 **랄프 루프 사용자 관점**에서만 설명합니다.
-
-## 테스트 가시성
-
-- CI 테스트 상태: `Test` 워크플로우 배지(상단)
-- 커버리지 산출물: 각 `Test` 실행의 artifact(`coverage.out`, `coverage.txt`)
-- 로컬 확인:
-
-```bash
-go test ./... -covermode=atomic -coverprofile=coverage.out
-go tool cover -func=coverage.out
-```
 
 ## 세팅
 
@@ -89,19 +74,16 @@ git push origin v0.1.0
 
 선택 사항: `COSIGN_PRIVATE_KEY`, `COSIGN_PASSWORD` 시크릿을 설정하면 `checksums.txt.sig`, `cosign.pub`도 함께 배포됩니다.
 
-### 3) 제어 디렉터리 1회 지정
+### 3) Control Dir 기본값
 
-`ralphctl`은 공용 플러그인/설정을 담는 control dir이 필요합니다.
-
-```bash
-export RALPH_CONTROL_DIR="$HOME/.ralph-control"
-mkdir -p "$RALPH_CONTROL_DIR"
-```
+- 기본 control dir: `~/.ralph-control`
+- 첫 실행 시 기본 plugin/registry가 자동으로 준비됩니다.
+- 다른 경로를 쓰고 싶으면 `--control-dir <DIR>`로 override 하세요.
 
 ### 4) 프로젝트 연결 (권장: setup)
 
 ```bash
-ralphctl --control-dir "$RALPH_CONTROL_DIR" --project-dir "$PWD" setup
+ralphctl --project-dir "$PWD" setup
 ```
 
 - 위 명령을 실행하면 프로젝트 루트에 `./ralph` 실행 헬퍼가 생성됩니다.
@@ -109,10 +91,24 @@ ralphctl --control-dir "$RALPH_CONTROL_DIR" --project-dir "$PWD" setup
 - 기본 설정은 `.ralph/profile.yaml`(base), `.ralph/profile.local.yaml`(local override)에 저장됩니다.
 - `RALPH_*` env 값(`profile.env`, `profile.local.env`, 프로세스 env)은 YAML보다 우선 적용됩니다.
 
+빠른 시작(질문 없이 기본값 적용):
+
+```bash
+ralphctl --project-dir "$PWD" setup --mode quickstart
+```
+
+원격/장시간 운영 preset(무중단 튜닝 기본값 적용):
+
+```bash
+ralphctl --project-dir "$PWD" setup --mode remote
+# 원샷 온보딩(세팅 + 즉시 데몬 시작)
+ralphctl --project-dir "$PWD" setup --mode remote --start
+```
+
 비대화형 기본 세팅:
 
 ```bash
-ralphctl --control-dir "$RALPH_CONTROL_DIR" --project-dir "$PWD" setup --non-interactive
+ralphctl --project-dir "$PWD" setup --non-interactive
 ```
 
 `setup`에서 묻는 항목:
@@ -131,7 +127,7 @@ ralphctl --control-dir "$RALPH_CONTROL_DIR" --project-dir "$PWD" setup --non-int
 대화형 `setup`에서 선택하거나, 직접 지정할 수 있습니다.
 
 ```bash
-ralphctl --control-dir "$RALPH_CONTROL_DIR" --project-dir "$PWD" install --plugin universal-default
+ralphctl --project-dir "$PWD" install --plugin universal-default
 ```
 
 ### 6) 세팅 점검
@@ -168,12 +164,16 @@ PRD JSON에서 일괄 생성:
 
 ```bash
 ./ralph start
+# start 전 doctor 복구 + 권한 보정
+./ralph start --doctor-repair --fix-perms
 ./ralph status
 ./ralph tail
 ./ralph stop
 ```
 
 - 기본값으로 `start`는 supervisor 모드로 실행되어 worker 비정상 종료 시 자동 재시작합니다.
+- 기본값으로 `start`는 실행 전에 `doctor --repair` preflight를 수행합니다(`--doctor-repair=false`로 비활성화).
+- 권한 이슈가 잦은 환경에서는 `--fix-perms`로 `.ralph`/control-dir 권한을 정규화할 수 있습니다.
 - 비활성화하려면 `supervisor_enabled: false`를 설정하세요.
 
 1회/지정 루프 실행:
@@ -191,6 +191,8 @@ PRD JSON에서 일괄 생성:
 ./ralph status
 ./ralph doctor
 ```
+
+- `status`에서 `last_profile_reload_at`, `profile_reload_count`로 실행 중 설정 반영 시점을 확인할 수 있습니다.
 
 주요 산출물 위치:
 
@@ -255,6 +257,9 @@ validate_cmd: "make test && make lint"
 - `doctor --repair`: 안전한 자동 복구(룰 파일 보정, stale pid 정리, in-progress 복구)
 - `recover`: in-progress 이슈를 ready로 복구
 - busy-wait 감지 시에는 내부적으로 `doctor --repair` 동등 복구가 자동 실행됩니다(기본값).
+- `doctor`에는 `security:*` 점검(샌드박스/승인 정책/검증 명령/권한)과 `plugin-registry` 무결성 점검이 포함됩니다.
+- 루프 시작 시 `project/control/issues/in-progress/done/blocked/logs` 쓰기 권한 preflight를 수행해 권한 문제를 조기 감지합니다.
+- 처리 중 권한 에러가 반복되면 지수 백오프(+busywait event 기록)로 과도한 재시도를 방지합니다.
 
 자동 복구 on/off:
 
@@ -273,9 +278,14 @@ export RALPH_BUSYWAIT_DOCTOR_REPAIR_ENABLED=false
 `profile.local.yaml`에서 timeout/retry/watchdog/supervisor를 조절할 수 있습니다.
 
 ```yaml
+codex_model: auto
+# optional: role별 override
+codex_model_developer: gpt-5.3-codex-spark
 codex_exec_timeout_sec: 900
 codex_retry_max_attempts: 3
 codex_retry_backoff_sec: 10
+codex_skip_git_repo_check: true
+codex_output_last_message_enabled: true
 inprogress_watchdog_enabled: true
 inprogress_watchdog_stale_sec: 1800
 inprogress_watchdog_scan_loops: 1
@@ -286,15 +296,26 @@ supervisor_restart_delay_sec: 5
 - `codex_exec_timeout_sec`: codex 1회 실행 타임아웃(초, `0`이면 무제한)
 - `codex_retry_max_attempts`: codex 실패 시 최대 재시도 횟수(총 시도 횟수)
 - `codex_retry_backoff_sec`: 재시도 기본 대기(지수 백오프)
+- `codex_skip_git_repo_check`: git 저장소가 아닌 디렉터리에서도 codex 실행 허용
+- `codex_output_last_message_enabled`: codex 마지막 응답을 `.ralph/logs/*.last.txt`로 저장
+- `codex_model`: `auto`면 Codex CLI 기본 모델 사용(업그레이드 시 자동 추종)
+- `codex_model_*`: role별 모델 override (`manager/planner/developer/qa`), 비어있으면 `codex_model` 사용
 - `inprogress_watchdog_*`: 오래된 `in-progress` 자동 복구
 - `supervisor_*`: 백그라운드 worker 자동 재시작
+- 루프 실행 중 `profile*.yaml/.env`를 변경하면 재시작 없이 다음 이슈부터 반영됩니다.
+
+env로 일시 override:
+
+```bash
+export RALPH_CODEX_MODEL_DEVELOPER=gpt-5.3-codex-spark
+```
 
 ### 6) 멀티 프로젝트(Fleet)
 
 대화형 관리(권장):
 
 ```bash
-ralphctl --control-dir "$RALPH_CONTROL_DIR" fleet
+ralphctl fleet
 ```
 
 - 메뉴에서 프로젝트 `register/unregister/start/stop/start all/stop all/status`를 바로 관리할 수 있습니다.
@@ -303,16 +324,99 @@ ralphctl --control-dir "$RALPH_CONTROL_DIR" fleet
 명령형 관리:
 
 ```bash
-ralphctl --control-dir "$RALPH_CONTROL_DIR" fleet register \
+ralphctl fleet register \
   --id wallet \
   --project-dir <wallet-project-dir> \
   --plugin universal-default \
   --prd PRD.md
 
-ralphctl --control-dir "$RALPH_CONTROL_DIR" fleet start --all
-ralphctl --control-dir "$RALPH_CONTROL_DIR" fleet status --all
-ralphctl --control-dir "$RALPH_CONTROL_DIR" fleet stop --all
+ralphctl fleet start --all
+ralphctl fleet status --all
+ralphctl fleet stop --all
+ralphctl fleet dashboard --all
+ralphctl fleet dashboard --all --watch --interval-sec 5
 ```
+
+- `fleet dashboard --watch`에는 `last_failure`, `codex_retries`, `perm_streak`가 함께 표시됩니다.
+
+### 7) 서비스 자동기동(systemd/launchd)
+
+```bash
+ralphctl --project-dir "$PWD" service install --start
+ralphctl --project-dir "$PWD" service status
+ralphctl --project-dir "$PWD" service uninstall
+```
+
+### 8) Telegram Bot 채널(선택)
+
+텔레그램은 필수 설정이 아닙니다. 필요할 때만 설정해서 사용하면 됩니다.
+
+권장: 1회 setup 후 run
+
+```bash
+# 대화형 설정(토큰/chat-id/알림/제어권한)
+ralphctl --project-dir "$PWD" telegram setup
+
+# 실행(기본 설정 파일 자동 사용)
+ralphctl --project-dir "$PWD" telegram run
+```
+
+비대화형 설정:
+
+```bash
+ralphctl --project-dir "$PWD" telegram setup --non-interactive \
+  --token "<bot-token>" \
+  --chat-ids "<allowed-chat-id-1>,<allowed-chat-id-2>" \
+  --allow-control=false \
+  --notify=true
+```
+
+`telegram setup`은 기본적으로 `<control-dir>/telegram.env`에 저장됩니다. `run`은 같은 파일을 자동으로 읽고, 환경변수/flag로 override할 수 있습니다.
+
+실행 시 override 예시:
+
+```bash
+# 알림만 끄기
+ralphctl --project-dir "$PWD" telegram run --notify=false
+
+# 제어 명령 허용(/start, /stop, /restart, /doctor_repair, /recover)
+ralphctl --project-dir "$PWD" telegram run --allow-control
+```
+
+기본 알림(`--notify=true`):
+
+- `blocked` 증가 감지
+- `codex_retries` 임계치 초과(기본 `2`)
+- `busy-wait(stuck)` 감지
+- `permission streak` 임계치 초과(기본 `3`)
+
+알림 튜닝:
+
+```bash
+ralphctl --project-dir "$PWD" telegram run \
+  --notify-interval-sec 30 \
+  --notify-retry-threshold 3 \
+  --notify-perm-streak-threshold 4
+```
+
+지원 명령:
+
+- `/help`, `/ping`
+- `/status`, `/doctor`, `/fleet`
+- (`--allow-control`일 때) `/start`, `/stop`, `/restart`, `/doctor_repair`, `/recover`
+
+### 9) Plugin Registry(무결성)
+
+manifest 생성/검증:
+
+```bash
+ralphctl registry generate
+ralphctl registry list
+ralphctl registry verify
+```
+
+- `plugins/registry.json`의 SHA256으로 plugin 파일 무결성을 검사합니다.
+- registry가 존재하면 `install/apply-plugin/setup` 시 선택 plugin이 registry 검증을 통과해야 적용됩니다.
 
 ## License
 

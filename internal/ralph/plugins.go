@@ -39,6 +39,9 @@ func ApplyPlugin(paths Paths, pluginName string) error {
 	if _, err := os.Stat(src); err != nil {
 		return fmt.Errorf("plugin not found: %s", pluginName)
 	}
+	if err := VerifyPluginWithRegistry(paths.ControlDir, pluginName); err != nil {
+		return fmt.Errorf("registry verification failed for plugin %s: %w", pluginName, err)
+	}
 
 	if err := EnsureLayout(paths); err != nil {
 		return err

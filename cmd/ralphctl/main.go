@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"codex-ralph/internal/ralph"
 )
@@ -30,14 +31,15 @@ func run() error {
 		return err
 	}
 
+	defaultControl := defaultControlDir(cwd)
 	global := flag.NewFlagSet("ralphctl", flag.ContinueOnError)
 	global.SetOutput(os.Stderr)
-	controlDir := global.String("control-dir", cwd, "directory that stores shared plugins and fleet config")
+	controlDir := global.String("control-dir", defaultControl, "directory that stores shared plugins and fleet config")
 	projectDir := global.String("project-dir", cwd, "target project directory (.ralph lives here)")
 
 	global.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: ralphctl [--control-dir DIR] [--project-dir DIR] <command> [args]")
-		fmt.Fprintln(os.Stderr, "Commands: list-plugins, install, apply-plugin, setup, init, on, off, new, import-prd, recover, doctor, run, supervise, start, stop, restart, status, tail, fleet")
+		fmt.Fprintln(os.Stderr, "Commands: list-plugins, install, apply-plugin, registry, setup, init, on, off, new, import-prd, recover, doctor, run, supervise, start, stop, restart, status, tail, service, fleet, telegram")
 	}
 
 	if err := global.Parse(os.Args[1:]); err != nil {
@@ -56,8 +58,31 @@ func run() error {
 	cmd := args[0]
 	cmdArgs := args[1:]
 
+	if commandNeedsControlAssets(cmd) {
+		if err := ralph.EnsureDefaultControlAssets(*controlDir); err != nil {
+			return err
+		}
+	}
+
 	if cmd == "fleet" {
 		return runFleetCommand(*controlDir, cmdArgs)
+	}
+	if cmd == "registry" {
+		return runRegistryCommand(*controlDir, cmdArgs)
+	}
+	if cmd == "service" {
+		paths, err := ralph.NewPaths(*controlDir, *projectDir)
+		if err != nil {
+			return err
+		}
+		return runServiceCommand(paths, cmdArgs)
+	}
+	if cmd == "telegram" {
+		paths, err := ralph.NewPaths(*controlDir, *projectDir)
+		if err != nil {
+			return err
+		}
+		return runTelegramCommand(*controlDir, paths, cmdArgs)
 	}
 
 	paths, err := ralph.NewPaths(*controlDir, *projectDir)
@@ -118,6 +143,8 @@ func run() error {
 		fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 		plugin := fs.String("plugin", "", "preferred default plugin in wizard")
 		nonInteractive := fs.Bool("non-interactive", false, "apply defaults without prompts")
+		modeRaw := fs.String("mode", string(ralph.SetupFlowModeAdvanced), "setup mode: quickstart|advanced|remote")
+		startAfter := fs.Bool("start", false, "start daemon after setup completes")
 		if err := fs.Parse(cmdArgs); err != nil {
 			return err
 		}
@@ -125,26 +152,59 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		if *nonInteractive {
-			selection := ralph.SetupSelections{
-				Plugin:           strings.TrimSpace(*plugin),
-				RoleRulesEnabled: true,
-				HandoffRequired:  true,
-				HandoffSchema:    "universal",
-				DoctorAutoRepair: true,
-				ValidationMode:   ralph.SetupModePluginDefault,
-			}
+		mode := ralph.NormalizeSetupFlowMode(*modeRaw)
+		if mode == "" {
+			return fmt.Errorf("invalid --mode: %s (expected quickstart|advanced|remote)", *modeRaw)
+		}
+		if *nonInteractive && mode == ralph.SetupFlowModeAdvanced {
+			mode = ralph.SetupFlowModeQuickstart
+		}
+		if mode == ralph.SetupFlowModeQuickstart || mode == ralph.SetupFlowModeRemote {
+			selection := ralph.DefaultSetupSelections(strings.TrimSpace(*plugin))
 			if err := ralph.ApplySetupSelections(paths, exe, selection); err != nil {
 				return err
 			}
-			fmt.Println("setup complete (non-interactive)")
+			if mode == ralph.SetupFlowModeRemote {
+				if err := ralph.ApplyRemoteProfilePreset(paths); err != nil {
+					return err
+				}
+			}
+			fmt.Printf("setup complete (%s)\n", mode)
 			fmt.Printf("- helper: %s\n", filepath.Join(paths.ProjectDir, "ralph"))
 			fmt.Printf("- profile_yaml: %s\n", paths.ProfileYAMLFile)
 			fmt.Printf("- profile_local_yaml: %s\n", paths.ProfileLocalYAMLFile)
 			fmt.Printf("- profile_env_override: %s\n", paths.ProfileLocalFile)
+			if mode == ralph.SetupFlowModeRemote {
+				fmt.Println("- remote_preset: codex timeout/retry + watchdog + supervisor enabled")
+			}
+			if *startAfter {
+				startResult, err := startProjectDaemon(paths, startOptions{
+					DoctorRepair: true,
+					FixPerms:     true,
+					Out:          os.Stdout,
+				})
+				if err != nil {
+					return err
+				}
+				fmt.Printf("- daemon: %s\n", startResult)
+			}
 			return nil
 		}
-		return ralph.RunSetupWizard(paths, exe, *plugin, os.Stdin, os.Stdout)
+		if err := ralph.RunSetupWizard(paths, exe, *plugin, os.Stdin, os.Stdout); err != nil {
+			return err
+		}
+		if *startAfter {
+			startResult, err := startProjectDaemon(paths, startOptions{
+				DoctorRepair: true,
+				FixPerms:     true,
+				Out:          os.Stdout,
+			})
+			if err != nil {
+				return err
+			}
+			fmt.Printf("- daemon: %s\n", startResult)
+		}
+		return nil
 
 	case "init":
 		if err := ralph.EnsureLayout(paths); err != nil {
@@ -288,15 +348,21 @@ func run() error {
 		return ralph.RunSupervisor(ctx, paths, profile, allowedRoles, os.Stdout)
 
 	case "start":
-		pid, already, err := ralph.StartDaemon(paths)
+		fs := flag.NewFlagSet("start", flag.ContinueOnError)
+		doctorRepair := fs.Bool("doctor-repair", true, "run doctor --repair before start")
+		fixPerms := fs.Bool("fix-perms", false, "normalize project/control permissions before repair/start")
+		if err := fs.Parse(cmdArgs); err != nil {
+			return err
+		}
+		startResult, err := startProjectDaemon(paths, startOptions{
+			DoctorRepair: *doctorRepair,
+			FixPerms:     *fixPerms,
+			Out:          os.Stdout,
+		})
 		if err != nil {
 			return err
 		}
-		if already {
-			fmt.Printf("ralph-loop already running (pid=%d)\n", pid)
-		} else {
-			fmt.Printf("ralph-loop started (pid=%d)\n", pid)
-		}
+		fmt.Println(startResult)
 		return nil
 
 	case "stop":
@@ -340,10 +406,287 @@ func run() error {
 	}
 }
 
+func runRegistryCommand(controlDir string, args []string) error {
+	usage := func() {
+		fmt.Fprintln(os.Stderr, "Usage: ralphctl --control-dir DIR registry <subcommand>")
+		fmt.Fprintln(os.Stderr, "Subcommands: generate, list, verify")
+	}
+	if len(args) == 0 {
+		usage()
+		return fmt.Errorf("registry subcommand is required")
+	}
+
+	switch args[0] {
+	case "generate":
+		reg, err := ralph.GeneratePluginRegistry(controlDir)
+		if err != nil {
+			return err
+		}
+		if err := ralph.SavePluginRegistry(controlDir, reg); err != nil {
+			return err
+		}
+		fmt.Println("plugin registry generated")
+		fmt.Printf("- path: %s\n", ralph.PluginRegistryPath(controlDir))
+		fmt.Printf("- version: %d\n", reg.Version)
+		fmt.Printf("- generated_at_utc: %s\n", reg.GeneratedAtUTC)
+		fmt.Printf("- plugins: %d\n", len(reg.Plugins))
+		return nil
+
+	case "list":
+		reg, err := ralph.LoadPluginRegistry(controlDir)
+		if err != nil {
+			return err
+		}
+		if len(reg.Plugins) == 0 {
+			fmt.Println("plugin registry is empty")
+			return nil
+		}
+		fmt.Println("## Plugin Registry")
+		fmt.Printf("- path: %s\n", ralph.PluginRegistryPath(controlDir))
+		fmt.Printf("- generated_at_utc: %s\n", reg.GeneratedAtUTC)
+		for _, entry := range reg.Plugins {
+			fmt.Printf("- name=%s file=%s sha256=%s\n", entry.Name, entry.File, entry.SHA256)
+		}
+		return nil
+
+	case "verify":
+		checks, err := ralph.VerifyPluginRegistry(controlDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("plugin registry not found (%s); run: ralphctl --control-dir %s registry generate", ralph.PluginRegistryPath(controlDir), controlDir)
+			}
+			return err
+		}
+		failures := ralph.RegistryFailureCount(checks)
+		fmt.Println("## Plugin Registry Verify")
+		fmt.Printf("- path: %s\n", ralph.PluginRegistryPath(controlDir))
+		for _, check := range checks {
+			fmt.Printf("- [%s] %s: %s\n", check.Status, check.Name, check.Detail)
+		}
+		if failures > 0 {
+			return fmt.Errorf("plugin registry verification failed: %d issue(s)", failures)
+		}
+		fmt.Println("plugin registry verification passed")
+		return nil
+
+	default:
+		usage()
+		return fmt.Errorf("unknown registry subcommand: %s", args[0])
+	}
+}
+
+type startOptions struct {
+	DoctorRepair bool
+	FixPerms     bool
+	Out          io.Writer
+}
+
+func startProjectDaemon(paths ralph.Paths, opts startOptions) (string, error) {
+	out := opts.Out
+	if out == nil {
+		out = os.Stdout
+	}
+
+	if opts.FixPerms {
+		fixResult, err := ralph.AutoFixPermissions(paths)
+		if err != nil {
+			return "", err
+		}
+		if len(fixResult.UpdatedPaths) > 0 {
+			fmt.Fprintf(out, "permission fix: updated %d path(s)\n", len(fixResult.UpdatedPaths))
+		} else {
+			fmt.Fprintln(out, "permission fix: no changes")
+		}
+	}
+
+	if opts.DoctorRepair {
+		actions, err := ralph.RepairProject(paths)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintln(out, "## Start Preflight (doctor --repair)")
+		for _, action := range actions {
+			fmt.Fprintf(out, "- [%s] %s: %s\n", action.Status, action.Name, action.Detail)
+		}
+	}
+
+	pid, already, err := ralph.StartDaemon(paths)
+	if err != nil {
+		return "", err
+	}
+	if already {
+		return fmt.Sprintf("ralph-loop already running (pid=%d)", pid), nil
+	}
+	return fmt.Sprintf("ralph-loop started (pid=%d)", pid), nil
+}
+
+func runServiceCommand(paths ralph.Paths, args []string) error {
+	usage := func() {
+		fmt.Fprintln(os.Stderr, "Usage: ralphctl --control-dir DIR --project-dir DIR service <subcommand> [args]")
+		fmt.Fprintln(os.Stderr, "Subcommands: install, uninstall, status")
+	}
+	if len(args) == 0 {
+		usage()
+		return fmt.Errorf("service subcommand is required")
+	}
+
+	sub := args[0]
+	subArgs := args[1:]
+
+	switch sub {
+	case "install":
+		fs := flag.NewFlagSet("service install", flag.ContinueOnError)
+		name := fs.String("name", "", "service name (default: ralph-<project-dir>)")
+		startNow := fs.Bool("start", true, "enable/start service immediately")
+		if err := fs.Parse(subArgs); err != nil {
+			return err
+		}
+		exe, err := executablePath()
+		if err != nil {
+			return err
+		}
+		result, err := ralph.InstallService(paths, exe, *name, *startNow)
+		if err != nil {
+			return err
+		}
+		fmt.Println("service installed")
+		fmt.Printf("- platform: %s\n", result.Platform)
+		fmt.Printf("- service: %s\n", result.ServiceName)
+		fmt.Printf("- unit_path: %s\n", result.UnitPath)
+		fmt.Printf("- activated: %t\n", result.Activated)
+		hint := ralph.ServiceInstallHint(result.Platform)
+		if hint != "" {
+			fmt.Printf("- hint: %s\n", hint)
+		}
+		for _, warn := range result.Warnings {
+			fmt.Printf("- warning: %s\n", warn)
+		}
+		return nil
+
+	case "uninstall":
+		fs := flag.NewFlagSet("service uninstall", flag.ContinueOnError)
+		name := fs.String("name", "", "service name (default: ralph-<project-dir>)")
+		if err := fs.Parse(subArgs); err != nil {
+			return err
+		}
+		result, err := ralph.UninstallService(paths, *name)
+		if err != nil {
+			return err
+		}
+		fmt.Println("service uninstalled")
+		fmt.Printf("- platform: %s\n", result.Platform)
+		fmt.Printf("- service: %s\n", result.ServiceName)
+		fmt.Printf("- unit_path: %s\n", result.UnitPath)
+		for _, warn := range result.Warnings {
+			fmt.Printf("- warning: %s\n", warn)
+		}
+		return nil
+
+	case "status":
+		fs := flag.NewFlagSet("service status", flag.ContinueOnError)
+		name := fs.String("name", "", "service name (default: ralph-<project-dir>)")
+		if err := fs.Parse(subArgs); err != nil {
+			return err
+		}
+		status, err := ralph.GetServiceStatus(paths, *name)
+		if err != nil {
+			return err
+		}
+		fmt.Println("## Service Status")
+		fmt.Printf("- platform: %s\n", status.Platform)
+		fmt.Printf("- service: %s\n", status.ServiceName)
+		fmt.Printf("- installed: %t\n", status.Installed)
+		fmt.Printf("- active: %t\n", status.Active)
+		if strings.TrimSpace(status.Detail) != "" {
+			fmt.Printf("- detail: %s\n", status.Detail)
+		}
+		return nil
+
+	default:
+		usage()
+		return fmt.Errorf("unknown service subcommand: %s", sub)
+	}
+}
+
+func renderFleetDashboard(controlDir, projectID string, all bool, out io.Writer) error {
+	projects, err := ralph.ResolveFleetProjects(controlDir, projectID, all)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "## Fleet Dashboard")
+	fmt.Fprintf(out, "- updated_utc: %s\n", time.Now().UTC().Format(time.RFC3339))
+	fmt.Fprintf(out, "- control_dir: %s\n", controlDir)
+	fmt.Fprintf(out, "- projects: %d\n", len(projects))
+	for _, p := range projects {
+		paths, err := ralph.NewPaths(controlDir, p.ProjectDir)
+		if err != nil {
+			return err
+		}
+		st, err := ralph.GetStatus(paths)
+		if err != nil {
+			return err
+		}
+		roles, rolePIDs := ralph.RunningRoleDaemons(paths)
+		fmt.Fprintf(
+			out,
+			"- project=%s plugin=%s daemon=%s ready=%d in_progress=%d done=%d blocked=%d\n",
+			p.ID,
+			p.Plugin,
+			st.Daemon,
+			st.QueueReady,
+			st.InProgress,
+			st.Done,
+			st.Blocked,
+		)
+		if len(roles) > 0 {
+			roleLine := []string{}
+			for _, role := range ralph.RequiredAgentRoles {
+				pid, ok := rolePIDs[role]
+				if !ok {
+					continue
+				}
+				roleLine = append(roleLine, fmt.Sprintf("%s:%d", role, pid))
+			}
+			if len(roleLine) > 0 {
+				fmt.Fprintf(out, "  workers=%s\n", strings.Join(roleLine, ","))
+			}
+		}
+		if st.LastProfileReloadAt != "" || st.ProfileReloadCount > 0 {
+			fmt.Fprintf(
+				out,
+				"  profile_reload_at=%s | profile_reload_count=%d\n",
+				valueOrDash(st.LastProfileReloadAt),
+				st.ProfileReloadCount,
+			)
+		}
+		if st.LastFailureCause != "" || st.LastCodexRetryCount > 0 || st.LastPermissionStreak > 0 {
+			fmt.Fprintf(
+				out,
+				"  last_failure=%s | codex_retries=%d | perm_streak=%d\n",
+				compactSingleLine(st.LastFailureCause, 120),
+				st.LastCodexRetryCount,
+				st.LastPermissionStreak,
+			)
+		}
+	}
+	return nil
+}
+
+func sleepOrInterrupt(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func runFleetCommand(controlDir string, args []string) error {
 	usage := func() {
 		fmt.Fprintln(os.Stderr, "Usage: ralphctl --control-dir DIR fleet <subcommand> [args]")
-		fmt.Fprintln(os.Stderr, "Subcommands: interactive, register, unregister, list, start, stop, status, apply-plugin, bootstrap")
+		fmt.Fprintln(os.Stderr, "Subcommands: interactive, register, unregister, list, start, stop, status, dashboard, apply-plugin, bootstrap")
 	}
 	if len(args) == 0 {
 		return runFleetInteractive(controlDir)
@@ -561,8 +904,56 @@ func runFleetCommand(controlDir string, args []string) error {
 			if st.LastSelfHealAt != "" {
 				fmt.Printf("  - busywait_last_detected=%s self_heal_attempts=%d\n", st.LastBusyWaitDetectedAt, st.SelfHealAttempts)
 			}
+			if st.LastProfileReloadAt != "" || st.ProfileReloadCount > 0 {
+				fmt.Printf(
+					"  - profile_reload_at=%s profile_reload_count=%d\n",
+					valueOrDash(st.LastProfileReloadAt),
+					st.ProfileReloadCount,
+				)
+			}
+			if st.LastFailureCause != "" || st.LastCodexRetryCount > 0 || st.LastPermissionStreak > 0 {
+				fmt.Printf(
+					"  - last_failure=%s codex_retries=%d perm_streak=%d\n",
+					compactSingleLine(st.LastFailureCause, 120),
+					st.LastCodexRetryCount,
+					st.LastPermissionStreak,
+				)
+			}
 		}
 		return nil
+
+	case "dashboard":
+		fs := flag.NewFlagSet("fleet dashboard", flag.ContinueOnError)
+		id := fs.String("id", "", "fleet project id")
+		all := fs.Bool("all", true, "show all projects")
+		watch := fs.Bool("watch", false, "refresh continuously")
+		intervalSec := fs.Int("interval-sec", 5, "refresh interval seconds when --watch is enabled")
+		if err := fs.Parse(subArgs); err != nil {
+			return err
+		}
+		if *intervalSec <= 0 {
+			return fmt.Errorf("--interval-sec must be > 0")
+		}
+		if *watch {
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			for {
+				select {
+				case <-ctx.Done():
+					fmt.Println("[fleet-dashboard] interrupted")
+					return nil
+				default:
+				}
+				fmt.Print("\033[H\033[2J")
+				if err := renderFleetDashboard(controlDir, *id, *all, os.Stdout); err != nil {
+					return err
+				}
+				if err := sleepOrInterrupt(ctx, time.Duration(*intervalSec)*time.Second); err != nil {
+					return nil
+				}
+			}
+		}
+		return renderFleetDashboard(controlDir, *id, *all, os.Stdout)
 
 	case "apply-plugin":
 		fs := flag.NewFlagSet("fleet apply-plugin", flag.ContinueOnError)
@@ -635,7 +1026,8 @@ func runFleetInteractive(controlDir string) error {
 		fmt.Println("6) Start all projects")
 		fmt.Println("7) Stop all projects")
 		fmt.Println("8) Fleet status")
-		fmt.Println("9) Quit")
+		fmt.Println("9) Fleet dashboard")
+		fmt.Println("10) Quit")
 
 		choiceRaw, err := promptFleetInput(reader, "Choose", "1")
 		if err != nil {
@@ -675,7 +1067,11 @@ func runFleetInteractive(controlDir string) error {
 			if err := runFleetCommand(controlDir, []string{"status", "--all"}); err != nil {
 				fmt.Fprintf(os.Stderr, "[fleet] %v\n", err)
 			}
-		case "9", "q", "quit", "exit":
+		case "9":
+			if err := runFleetCommand(controlDir, []string{"dashboard", "--all"}); err != nil {
+				fmt.Fprintf(os.Stderr, "[fleet] %v\n", err)
+			}
+		case "10", "q", "quit", "exit":
 			fmt.Println("fleet interactive closed")
 			return nil
 		default:
@@ -874,6 +1270,44 @@ func promptFleetProjectID(reader *bufio.Reader, cfg ralph.FleetConfig, label str
 		options = append(options, p.ID)
 	}
 	return promptFleetChoice(reader, label, options, options[0])
+}
+
+func compactSingleLine(raw string, maxLen int) string {
+	v := strings.TrimSpace(raw)
+	v = strings.ReplaceAll(v, "\n", " ")
+	v = strings.ReplaceAll(v, "\r", " ")
+	v = strings.Join(strings.Fields(v), " ")
+	if maxLen <= 0 || len(v) <= maxLen {
+		return v
+	}
+	if maxLen <= 3 {
+		return v[:maxLen]
+	}
+	return v[:maxLen-3] + "..."
+}
+
+func valueOrDash(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return "-"
+	}
+	return raw
+}
+
+func defaultControlDir(cwd string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return cwd
+	}
+	return filepath.Join(home, ".ralph-control")
+}
+
+func commandNeedsControlAssets(cmd string) bool {
+	switch cmd {
+	case "list-plugins", "install", "apply-plugin", "setup", "fleet", "registry", "service", "telegram":
+		return true
+	default:
+		return false
+	}
 }
 
 func executablePath() (string, error) {

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "generated_at_utc": "2026-02-20T07:18:00Z",
+  "plugins": [
+    {
+      "name": "go-default",
+      "file": "go-default/plugin.env",
+      "sha256": "d417a064c43db58a9ed5e338a5d20291368e9cf64a8a6eb0d3bc2f51827e39b3"
+    },
+    {
+      "name": "node-default",
+      "file": "node-default/plugin.env",
+      "sha256": "07859235a14e09436e0ae08c9914291e54726a0ca5ec81f997a9626da385e260"
+    },
+    {
+      "name": "universal-default",
+      "file": "universal-default/plugin.env",
+      "sha256": "ed70891c5a1256ec7f37f7a038be5a4e0c6e371c4a4851808bed9e18f6f25d91"
+    }
+  ]
+}

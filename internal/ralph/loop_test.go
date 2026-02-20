@@ -1,6 +1,8 @@
 package ralph
 
 import (
+	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -93,5 +95,140 @@ func TestCanRunBusyWaitSelfHeal(t *testing.T) {
 	readyState := BusyWaitState{LastSelfHealAt: now.Add(-5 * time.Minute)}
 	if ok, reason := canRunBusyWaitSelfHeal(now, readyState, cooldownProfile); !ok || reason != "" {
 		t.Fatalf("ready case mismatch: ok=%t reason=%q", ok, reason)
+	}
+}
+
+func TestClassifyCodexFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		exitCode  int
+		output    string
+		want      string
+		retryable bool
+	}{
+		{name: "auth", exitCode: 1, output: "not logged in, run: codex login", want: "codex_auth_error", retryable: false},
+		{name: "invalid-args", exitCode: 2, output: "unknown option --foo", want: "codex_invalid_args", retryable: false},
+		{name: "model", exitCode: 1, output: "unknown model gpt-x", want: "codex_model_error", retryable: false},
+		{name: "permission", exitCode: 1, output: "operation not permitted", want: "codex_permission_denied", retryable: false},
+		{name: "cancel", exitCode: 130, output: "", want: "codex_canceled", retryable: false},
+		{name: "transient", exitCode: 1, output: "temporary network issue", want: "", retryable: true},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, retryable := classifyCodexFailure(tt.exitCode, strings.ToLower(tt.output))
+			if got != tt.want || retryable != tt.retryable {
+				t.Fatalf("classifyCodexFailure(%d, %q)=(%q,%t) want=(%q,%t)", tt.exitCode, tt.output, got, retryable, tt.want, tt.retryable)
+			}
+		})
+	}
+}
+
+func TestTailBufferKeepsSuffix(t *testing.T) {
+	t.Parallel()
+
+	b := newTailBuffer(10)
+	_, _ = b.Write([]byte("hello"))
+	_, _ = b.Write([]byte(" world"))
+	if got := b.String(); got != "ello world" {
+		t.Fatalf("tail buffer mismatch: got=%q want=%q", got, "ello world")
+	}
+}
+
+func TestIsLikelyPermissionErr(t *testing.T) {
+	t.Parallel()
+
+	if !isLikelyPermissionErr(os.ErrPermission) {
+		t.Fatalf("os.ErrPermission should be detected")
+	}
+	if !isLikelyPermissionErr(errors.New("operation not permitted while opening file")) {
+		t.Fatalf("operation-not-permitted message should be detected")
+	}
+	if isLikelyPermissionErr(errors.New("temporary network failure")) {
+		t.Fatalf("non-permission error should not be detected")
+	}
+}
+
+func TestPermissionErrorBackoffSec(t *testing.T) {
+	t.Parallel()
+
+	if got := permissionErrorBackoffSec(2, 1); got != 5 {
+		t.Fatalf("streak1 backoff mismatch: got=%d want=%d", got, 5)
+	}
+	if got := permissionErrorBackoffSec(20, 2); got != 40 {
+		t.Fatalf("streak2 backoff mismatch: got=%d want=%d", got, 40)
+	}
+	if got := permissionErrorBackoffSec(20, 10); got != 300 {
+		t.Fatalf("cap mismatch: got=%d want=%d", got, 300)
+	}
+}
+
+func TestReloadLoopProfileUnchanged(t *testing.T) {
+	paths := newTestPaths(t)
+	resetProfileEnv(t)
+
+	current, err := LoadProfile(paths)
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+	next, changed, err := reloadLoopProfile(paths, current)
+	if err != nil {
+		t.Fatalf("reload profile: %v", err)
+	}
+	if changed {
+		t.Fatalf("reload should not report change")
+	}
+	if next.CodexModel != current.CodexModel {
+		t.Fatalf("profile should remain unchanged: got=%q want=%q", next.CodexModel, current.CodexModel)
+	}
+}
+
+func TestReloadLoopProfileChanged(t *testing.T) {
+	paths := newTestPaths(t)
+	resetProfileEnv(t)
+
+	current, err := LoadProfile(paths)
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+
+	writeFile(t, paths.ProfileLocalYAMLFile, `
+codex_model_developer: gpt-5.3-codex-spark
+idle_sleep_sec: 5
+`)
+
+	next, changed, err := reloadLoopProfile(paths, current)
+	if err != nil {
+		t.Fatalf("reload profile: %v", err)
+	}
+	if !changed {
+		t.Fatalf("reload should report changed profile")
+	}
+	if next.CodexModelDeveloper != "gpt-5.3-codex-spark" {
+		t.Fatalf("codex_model_developer mismatch: got=%q want=%q", next.CodexModelDeveloper, "gpt-5.3-codex-spark")
+	}
+	if next.IdleSleepSec != 5 {
+		t.Fatalf("idle_sleep_sec mismatch: got=%d want=5", next.IdleSleepSec)
+	}
+}
+
+func TestProfileReloadSummary(t *testing.T) {
+	p := DefaultProfile()
+	p.PluginName = "universal-default"
+	p.CodexModel = "auto"
+	p.CodexModelDeveloper = ""
+	p.IdleSleepSec = 20
+	p.CodexRetryMaxAttempts = 3
+	p.CodexExecTimeoutSec = 900
+
+	s := profileReloadSummary(p)
+	if !strings.Contains(s, "codex_model=auto") {
+		t.Fatalf("summary should include auto model: %q", s)
+	}
+	if !strings.Contains(s, "codex_model_developer=(inherit)") {
+		t.Fatalf("summary should include inherit marker: %q", s)
 	}
 }

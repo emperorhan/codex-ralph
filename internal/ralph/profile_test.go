@@ -91,3 +91,111 @@ RALPH_NO_READY_MAX_LOOPS: 7
 		t.Fatalf("RALPH_NO_READY_MAX_LOOPS mismatch: got=%d want=7", profile.NoReadyMaxLoops)
 	}
 }
+
+func TestLoadProfileRoleModelOverrides(t *testing.T) {
+	paths := newTestPaths(t)
+	resetProfileEnv(t)
+
+	writeFile(t, paths.ProfileYAMLFile, `
+codex:
+  model: gpt-global
+  model_developer: dev-yaml
+  model_qa: qa-yaml
+`)
+
+	writeFile(t, paths.ProfileLocalYAMLFile, `
+codex:
+  model_planner: planner-local-yaml
+`)
+
+	writeFile(t, paths.ProfileFile, `
+RALPH_CODEX_MODEL_MANAGER=manager-env
+RALPH_CODEX_MODEL_DEVELOPER=dev-env
+`)
+
+	writeFile(t, paths.ProfileLocalFile, `
+RALPH_CODEX_MODEL_DEVELOPER=dev-local-env
+`)
+
+	t.Setenv("RALPH_CODEX_MODEL_DEVELOPER", "dev-process")
+	t.Setenv("RALPH_CODEX_MODEL_QA", "qa-process")
+
+	profile, err := LoadProfile(paths)
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+
+	if profile.CodexModel != "gpt-global" {
+		t.Fatalf("codex_model mismatch: got=%q want=%q", profile.CodexModel, "gpt-global")
+	}
+	if profile.CodexModelManager != "manager-env" {
+		t.Fatalf("codex_model_manager mismatch: got=%q want=%q", profile.CodexModelManager, "manager-env")
+	}
+	if profile.CodexModelPlanner != "planner-local-yaml" {
+		t.Fatalf("codex_model_planner mismatch: got=%q want=%q", profile.CodexModelPlanner, "planner-local-yaml")
+	}
+	if profile.CodexModelDeveloper != "dev-process" {
+		t.Fatalf("codex_model_developer mismatch: got=%q want=%q", profile.CodexModelDeveloper, "dev-process")
+	}
+	if profile.CodexModelQA != "qa-process" {
+		t.Fatalf("codex_model_qa mismatch: got=%q want=%q", profile.CodexModelQA, "qa-process")
+	}
+
+	if got := profile.CodexModelForRole("manager"); got != "manager-env" {
+		t.Fatalf("model manager mismatch: got=%q want=%q", got, "manager-env")
+	}
+	if got := profile.CodexModelForRole("planner"); got != "planner-local-yaml" {
+		t.Fatalf("model planner mismatch: got=%q want=%q", got, "planner-local-yaml")
+	}
+	if got := profile.CodexModelForRole("developer"); got != "dev-process" {
+		t.Fatalf("model developer mismatch: got=%q want=%q", got, "dev-process")
+	}
+	if got := profile.CodexModelForRole("qa"); got != "qa-process" {
+		t.Fatalf("model qa mismatch: got=%q want=%q", got, "qa-process")
+	}
+	if got := profile.CodexModelForRole("unknown-role"); got != "gpt-global" {
+		t.Fatalf("model fallback mismatch: got=%q want=%q", got, "gpt-global")
+	}
+}
+
+func TestProfileToYAMLMapRoleModels(t *testing.T) {
+	profile := DefaultProfile()
+	profile.CodexModelManager = "manager-model"
+	profile.CodexModelDeveloper = "developer-model"
+
+	m := ProfileToYAMLMap(profile)
+	if m["codex_model_manager"] != "manager-model" {
+		t.Fatalf("codex_model_manager mismatch: got=%q want=%q", m["codex_model_manager"], "manager-model")
+	}
+	if m["codex_model_developer"] != "developer-model" {
+		t.Fatalf("codex_model_developer mismatch: got=%q want=%q", m["codex_model_developer"], "developer-model")
+	}
+	if _, ok := m["codex_model_planner"]; ok {
+		t.Fatalf("codex_model_planner should be omitted when empty")
+	}
+	if _, ok := m["codex_model_qa"]; ok {
+		t.Fatalf("codex_model_qa should be omitted when empty")
+	}
+}
+
+func TestCodexModelForRoleAutoBehavior(t *testing.T) {
+	profile := DefaultProfile()
+	if got := profile.CodexModelForRole("developer"); got != "" {
+		t.Fatalf("default auto model should resolve to empty exec model: got=%q", got)
+	}
+
+	profile.CodexModel = "gpt-5.3-codex"
+	if got := profile.CodexModelForRole("manager"); got != "gpt-5.3-codex" {
+		t.Fatalf("global model mismatch: got=%q want=%q", got, "gpt-5.3-codex")
+	}
+
+	profile.CodexModelDeveloper = "auto"
+	if got := profile.CodexModelForRole("developer"); got != "" {
+		t.Fatalf("role auto override should resolve to empty exec model: got=%q", got)
+	}
+
+	profile.CodexModelDeveloper = "gpt-5.3-codex-spark"
+	if got := profile.CodexModelForRole("developer"); got != "gpt-5.3-codex-spark" {
+		t.Fatalf("role explicit model mismatch: got=%q want=%q", got, "gpt-5.3-codex-spark")
+	}
+}

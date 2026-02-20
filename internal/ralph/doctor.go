@@ -118,6 +118,8 @@ func RunDoctor(paths Paths) (DoctorReport, error) {
 	} else {
 		report.add("plugin", doctorStatusPass, fmt.Sprintf("plugin file found: %s", profile.PluginName))
 	}
+	appendPluginRegistryChecks(&report, paths.ControlDir)
+	appendSecurityChecks(&report, paths, profile)
 
 	if _, err := exec.LookPath("bash"); err != nil {
 		report.add("command:bash", doctorStatusFail, "bash command not found")
@@ -351,4 +353,117 @@ func removeStalePIDFile(pidFile string) (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+func appendPluginRegistryChecks(report *DoctorReport, controlDir string) {
+	checks, err := VerifyPluginRegistry(controlDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			report.add("plugin-registry", doctorStatusWarn, "registry not found (run: ralphctl --control-dir DIR registry generate)")
+			return
+		}
+		report.add("plugin-registry", doctorStatusFail, err.Error())
+		return
+	}
+
+	passCount := 0
+	warnCount := 0
+	failCount := 0
+	for _, check := range checks {
+		switch check.Status {
+		case doctorStatusPass:
+			passCount++
+		case doctorStatusWarn:
+			warnCount++
+		case doctorStatusFail:
+			failCount++
+		default:
+			warnCount++
+		}
+	}
+	if failCount > 0 {
+		report.add("plugin-registry", doctorStatusFail, fmt.Sprintf("pass=%d warn=%d fail=%d", passCount, warnCount, failCount))
+		return
+	}
+	if warnCount > 0 {
+		report.add("plugin-registry", doctorStatusWarn, fmt.Sprintf("pass=%d warn=%d fail=%d", passCount, warnCount, failCount))
+		return
+	}
+	report.add("plugin-registry", doctorStatusPass, fmt.Sprintf("pass=%d warn=%d fail=%d", passCount, warnCount, failCount))
+}
+
+func appendSecurityChecks(report *DoctorReport, paths Paths, profile Profile) {
+	switch strings.TrimSpace(profile.CodexSandbox) {
+	case "danger-full-access":
+		report.add("security:codex-sandbox", doctorStatusFail, "danger-full-access is risky for unattended automation")
+	case "":
+		report.add("security:codex-sandbox", doctorStatusWarn, "empty codex sandbox; expected workspace-write")
+	default:
+		report.add("security:codex-sandbox", doctorStatusPass, profile.CodexSandbox)
+	}
+
+	if strings.TrimSpace(strings.ToLower(profile.CodexApproval)) != "never" {
+		report.add("security:codex-approval", doctorStatusWarn, fmt.Sprintf("codex approval=%s (recommended: never for autonomous loop)", profile.CodexApproval))
+	} else {
+		report.add("security:codex-approval", doctorStatusPass, "never")
+	}
+	if profile.CodexSkipGitRepoCheck {
+		report.add("security:codex-git-repo-check", doctorStatusPass, "skip-git-repo-check enabled")
+	} else {
+		report.add("security:codex-git-repo-check", doctorStatusWarn, "skip-git-repo-check disabled (non-git project may fail)")
+	}
+
+	validateCmdLower := strings.ToLower(strings.TrimSpace(profile.ValidateCmd))
+	if validateCmdLower == "" || strings.Contains(validateCmdLower, "validation skipped by setup") || strings.Contains(validateCmdLower, "skip validation") {
+		report.add("security:validation", doctorStatusWarn, "validation command looks disabled")
+	} else {
+		report.add("security:validation", doctorStatusPass, "validation command configured")
+	}
+
+	if strings.TrimSpace(profile.BusyWaitSelfHealCmd) != "" {
+		report.add("security:self-heal-cmd", doctorStatusWarn, "busywait self-heal command is enabled; review command safety")
+	} else {
+		report.add("security:self-heal-cmd", doctorStatusPass, "disabled")
+	}
+
+	checkFileWritePermissions(report, "security:file-perm:profile.yaml", paths.ProfileYAMLFile)
+	checkFileWritePermissions(report, "security:file-perm:profile.local.yaml", paths.ProfileLocalYAMLFile)
+	checkFileWritePermissions(report, "security:file-perm:profile.env", paths.ProfileFile)
+	checkFileWritePermissions(report, "security:file-perm:profile.local.env", paths.ProfileLocalFile)
+	checkDirectoryWritable(report, "security:write-check:project-dir", paths.ProjectDir)
+	checkDirectoryWritable(report, "security:write-check:control-dir", paths.ControlDir)
+}
+
+func checkFileWritePermissions(report *DoctorReport, checkName, path string) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			report.add(checkName, doctorStatusWarn, "file not found")
+			return
+		}
+		report.add(checkName, doctorStatusFail, err.Error())
+		return
+	}
+	perm := info.Mode().Perm()
+	if perm&0o022 != 0 {
+		report.add(checkName, doctorStatusFail, fmt.Sprintf("permissions too broad: %#o", perm))
+		return
+	}
+	report.add(checkName, doctorStatusPass, fmt.Sprintf("%#o", perm))
+}
+
+func checkDirectoryWritable(report *DoctorReport, checkName, dir string) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		report.add(checkName, doctorStatusFail, fmt.Sprintf("mkdir failed: %v", err))
+		return
+	}
+	f, err := os.CreateTemp(dir, ".ralph-write-check-*")
+	if err != nil {
+		report.add(checkName, doctorStatusFail, fmt.Sprintf("write failed: %v", err))
+		return
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	report.add(checkName, doctorStatusPass, "writable")
 }
