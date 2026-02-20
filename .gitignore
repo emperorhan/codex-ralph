@@ -1,0 +1,20 @@
+# Runtime state (generated per project)
+.ralph/
+
+# Optional local control directory (if configured under repo)
+.ralph-control/
+telegram.env
+telegram.offset
+
+# Local fleet state variants
+fleet/projects.local.json
+
+# Build and coverage artifacts
+bin/
+dist/
+coverage.out
+coverage.txt
+*.coverprofile
+
+# OS artifacts
+.DS_Store
