@@ -87,6 +87,9 @@ jobs:
   release:
     needs: [prepare, build]
     runs-on: ubuntu-latest
+    env:
+      COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -100,13 +103,10 @@ jobs:
           shasum -a 256 *.tar.gz > checksums.txt
 
       - uses: sigstore/cosign-installer@v3
-        if: ${{ secrets.COSIGN_PRIVATE_KEY != '' }}
+        if: ${{ env.COSIGN_PRIVATE_KEY != '' }}
 
       - name: Sign checksums (optional)
-        if: ${{ secrets.COSIGN_PRIVATE_KEY != '' }}
-        env:
-          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
-          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        if: ${{ env.COSIGN_PRIVATE_KEY != '' }}
         run: |
           set -euo pipefail
           printf "%s" "${COSIGN_PRIVATE_KEY}" > cosign.key
