@@ -191,9 +191,9 @@ if fetch "${SIG_URL}" "${TMP_DIR}/checksums.txt.sig" 2>/dev/null && fetch "${PUB
   SIG_AVAILABLE=true
 fi
 
-if [ "${VERIFY_SIGNATURE}" = "true" ] || { [ "${VERIFY_SIGNATURE}" = "auto" ] && [ "${SIG_AVAILABLE}" = "true" ]; }; then
+if [ "${VERIFY_SIGNATURE}" = "true" ]; then
   if ! has_cmd cosign; then
-    echo "cosign is required for signature verification" >&2
+    echo "cosign is required for signature verification (RALPH_VERIFY_SIGNATURE=true)" >&2
     exit 1
   fi
   if [ "${SIG_AVAILABLE}" != "true" ]; then
@@ -202,10 +202,20 @@ if [ "${VERIFY_SIGNATURE}" = "true" ] || { [ "${VERIFY_SIGNATURE}" = "auto" ] &&
   fi
   cosign verify-blob --key "${TMP_DIR}/cosign.pub" --signature "${TMP_DIR}/checksums.txt.sig" "${TMP_DIR}/checksums.txt" >/dev/null
   echo "[ralphctl-installer] signature verified"
+elif [ "${VERIFY_SIGNATURE}" = "auto" ]; then
+  if [ "${SIG_AVAILABLE}" = "true" ] && has_cmd cosign; then
+    cosign verify-blob --key "${TMP_DIR}/cosign.pub" --signature "${TMP_DIR}/checksums.txt.sig" "${TMP_DIR}/checksums.txt" >/dev/null
+    echo "[ralphctl-installer] signature verified"
+  elif [ "${SIG_AVAILABLE}" = "true" ] && ! has_cmd cosign; then
+    echo "[ralphctl-installer] cosign not found; proceeding with checksum verification only"
+  else
+    echo "[ralphctl-installer] signature files not present; checksum verification only"
+  fi
 elif [ "${VERIFY_SIGNATURE}" = "false" ]; then
   echo "[ralphctl-installer] signature verification skipped"
 else
-  echo "[ralphctl-installer] signature files not present; checksum verification only"
+  echo "invalid RALPH_VERIFY_SIGNATURE value: ${VERIFY_SIGNATURE} (expected: auto|true|false)" >&2
+  exit 1
 fi
 
 tar -xzf "${TMP_DIR}/${ASSET}" -C "${TMP_DIR}"
