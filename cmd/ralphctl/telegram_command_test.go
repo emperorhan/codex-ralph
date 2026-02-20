@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"codex-ralph/internal/ralph"
 )
@@ -678,12 +679,99 @@ func TestAdvanceTelegramPRDSessionQuestionDoesNotAdvance(t *testing.T) {
 	}
 }
 
+func TestIsLikelyTelegramPRDRecommendationRequest(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{in: "추천해줘", want: true},
+		{in: "제안 부탁해", want: true},
+		{in: "what should be in scope?", want: false},
+		{in: "best practice로 알려줘", want: true},
+		{in: "그냥 값 입력", want: false},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+			got := isLikelyTelegramPRDRecommendationRequest(tt.in)
+			if got != tt.want {
+				t.Fatalf("isLikelyTelegramPRDRecommendationRequest(%q)=%t want=%t", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseTelegramPRDCodexAssistResponse(t *testing.T) {
+	t.Parallel()
+
+	raw := "```json\n{\"intent\":\"recommend\",\"reply\":\"추천 1\\n추천 2\",\"normalized_answer\":\"\"}\n```"
+	got, err := parseTelegramPRDCodexAssistResponse(raw)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if got.Intent != "recommend" {
+		t.Fatalf("intent mismatch: got=%q want=%q", got.Intent, "recommend")
+	}
+	if !strings.Contains(got.Reply, "추천 1") {
+		t.Fatalf("reply mismatch: %q", got.Reply)
+	}
+}
+
+func TestParseTelegramPRDCodexScoreResponse(t *testing.T) {
+	t.Parallel()
+
+	raw := "{\"score\":91,\"ready_to_apply\":true,\"missing\":[\"none\"],\"summary\":\"완성도가 높음\"}"
+	got, err := parseTelegramPRDCodexScoreResponse(raw)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if got.Score != 91 {
+		t.Fatalf("score mismatch: got=%d want=91", got.Score)
+	}
+	if !got.ReadyToApply {
+		t.Fatalf("ready_to_apply mismatch")
+	}
+	if got.Summary == "" {
+		t.Fatalf("summary should not be empty")
+	}
+}
+
+func TestFormatTelegramPRDCodexScore(t *testing.T) {
+	t.Parallel()
+
+	s := telegramPRDSession{
+		CodexScore:      85,
+		CodexReady:      true,
+		CodexMissing:    nil,
+		CodexSummary:    "적용 가능",
+		CodexScoredAtUT: "2026-02-20T12:00:00Z",
+	}
+	out := formatTelegramPRDCodexScore(s)
+	if !strings.Contains(out, "scoring_mode: codex") {
+		t.Fatalf("missing codex scoring mode: %q", out)
+	}
+	if !strings.Contains(out, "status: ready_to_apply") {
+		t.Fatalf("missing ready status: %q", out)
+	}
+}
+
 func TestTelegramPRDSessionStoreRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	controlDir := filepath.Join(t.TempDir(), "control")
+	projectDir := filepath.Join(t.TempDir(), "project")
 	if err := os.MkdirAll(controlDir, 0o755); err != nil {
 		t.Fatalf("mkdir control dir: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	paths, err := ralph.NewPaths(controlDir, projectDir)
+	if err != nil {
+		t.Fatalf("new paths failed: %v", err)
 	}
 	session := telegramPRDSession{
 		ChatID:      42,
@@ -693,10 +781,10 @@ func TestTelegramPRDSessionStoreRoundTrip(t *testing.T) {
 			{ID: "US-001", Title: "결제", Description: "설명", Role: "developer", Priority: 10},
 		},
 	}
-	if err := telegramUpsertPRDSession(controlDir, session); err != nil {
+	if err := telegramUpsertPRDSession(paths, session); err != nil {
 		t.Fatalf("upsert session failed: %v", err)
 	}
-	got, found, err := telegramLoadPRDSession(controlDir, 42)
+	got, found, err := telegramLoadPRDSession(paths, 42)
 	if err != nil {
 		t.Fatalf("load session failed: %v", err)
 	}
@@ -706,10 +794,10 @@ func TestTelegramPRDSessionStoreRoundTrip(t *testing.T) {
 	if got.ProductName != "Wallet" || len(got.Stories) != 1 {
 		t.Fatalf("loaded session mismatch: %+v", got)
 	}
-	if err := telegramDeletePRDSession(controlDir, 42); err != nil {
+	if err := telegramDeletePRDSession(paths, 42); err != nil {
 		t.Fatalf("delete session failed: %v", err)
 	}
-	_, found, err = telegramLoadPRDSession(controlDir, 42)
+	_, found, err = telegramLoadPRDSession(paths, 42)
 	if err != nil {
 		t.Fatalf("reload after delete failed: %v", err)
 	}
@@ -766,5 +854,131 @@ func TestWriteTelegramPRDFile(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "\"problem\"") {
 		t.Fatalf("prd file should include context metadata: %s", string(content))
+	}
+}
+
+func TestTelegramPRDConversationTail(t *testing.T) {
+	t.Parallel()
+
+	controlDir := filepath.Join(t.TempDir(), "control")
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("mkdir control dir: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	paths, err := ralph.NewPaths(controlDir, projectDir)
+	if err != nil {
+		t.Fatalf("new paths failed: %v", err)
+	}
+
+	if err := appendTelegramPRDConversation(paths, 99, "user", "첫 질문"); err != nil {
+		t.Fatalf("append conversation #1 failed: %v", err)
+	}
+	if err := appendTelegramPRDConversation(paths, 99, "assistant", "첫 응답"); err != nil {
+		t.Fatalf("append conversation #2 failed: %v", err)
+	}
+	tail := readTelegramPRDConversationTail(paths, 99, 200)
+	if !strings.Contains(tail, "첫 질문") || !strings.Contains(tail, "첫 응답") {
+		t.Fatalf("conversation tail should contain both entries: %q", tail)
+	}
+}
+
+func TestTelegramPRDSessionStoreLegacyMigration(t *testing.T) {
+	t.Parallel()
+
+	controlDir := filepath.Join(t.TempDir(), "control")
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("mkdir control dir: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	paths, err := ralph.NewPaths(controlDir, projectDir)
+	if err != nil {
+		t.Fatalf("new paths failed: %v", err)
+	}
+
+	legacyPath := legacyTelegramPRDSessionFile(paths)
+	legacyPayload := `{"sessions":{"42":{"chat_id":42,"stage":"await_story_title","product_name":"Legacy Wallet"}}}`
+	if err := os.WriteFile(legacyPath, []byte(legacyPayload+"\n"), 0o600); err != nil {
+		t.Fatalf("write legacy session file failed: %v", err)
+	}
+
+	session, found, err := telegramLoadPRDSession(paths, 42)
+	if err != nil {
+		t.Fatalf("load with legacy migration failed: %v", err)
+	}
+	if !found {
+		t.Fatalf("legacy session should be loaded")
+	}
+	if session.ProductName != "Legacy Wallet" {
+		t.Fatalf("legacy session content mismatch: %+v", session)
+	}
+	if _, err := os.Stat(telegramPRDSessionFile(paths)); err != nil {
+		t.Fatalf("migrated session file missing: %v", err)
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy session file should be removed after migration: %v", err)
+	}
+}
+
+func TestTelegramPRDSessionLockRecoveryFromStaleInvalidOwner(t *testing.T) {
+	t.Parallel()
+
+	controlDir := filepath.Join(t.TempDir(), "control")
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("mkdir control dir: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	paths, err := ralph.NewPaths(controlDir, projectDir)
+	if err != nil {
+		t.Fatalf("new paths failed: %v", err)
+	}
+
+	lockPath := telegramPRDSessionFile(paths) + ".lock"
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		t.Fatalf("mkdir lock dir: %v", err)
+	}
+	if err := os.WriteFile(lockPath, []byte("invalid-owner\n"), 0o600); err != nil {
+		t.Fatalf("write lock file: %v", err)
+	}
+	old := time.Now().Add(-(telegramPRDSessionLockStale + 5*time.Second))
+	if err := os.Chtimes(lockPath, old, old); err != nil {
+		t.Fatalf("set stale mtime: %v", err)
+	}
+
+	session := telegramPRDSession{ChatID: 7, Stage: telegramPRDStageAwaitStoryTitle, ProductName: "lock-recovery"}
+	if err := telegramUpsertPRDSession(paths, session); err != nil {
+		t.Fatalf("upsert with stale lock should recover: %v", err)
+	}
+	loaded, found, err := telegramLoadPRDSession(paths, 7)
+	if err != nil {
+		t.Fatalf("load after lock recovery failed: %v", err)
+	}
+	if !found || loaded.ProductName != "lock-recovery" {
+		t.Fatalf("unexpected session after recovery: found=%t session=%+v", found, loaded)
+	}
+}
+
+func TestBuildTelegramPRDAssistPromptIncludesConversation(t *testing.T) {
+	t.Parallel()
+
+	session := telegramPRDSession{
+		ChatID:      1,
+		Stage:       telegramPRDStageAwaitProblem,
+		ProductName: "Ralph",
+	}
+	prompt := buildTelegramPRDAssistPrompt(session, "문제는 멈춤", "### 2026-02-20T00:00:00Z | user\n이전 입력")
+	if !strings.Contains(prompt, "Recent conversation (markdown):") {
+		t.Fatalf("assist prompt should include conversation section: %q", prompt)
+	}
+	if !strings.Contains(prompt, "이전 입력") {
+		t.Fatalf("assist prompt should include conversation content: %q", prompt)
 	}
 }

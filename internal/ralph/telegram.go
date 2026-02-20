@@ -22,17 +22,19 @@ type TelegramCommandHandler func(ctx context.Context, chatID int64, text string)
 type TelegramNotifyHandler func(ctx context.Context) ([]string, error)
 
 type TelegramBotOptions struct {
-	Token             string
-	AllowedChatIDs    map[int64]struct{}
-	AllowedUserIDs    map[int64]struct{}
-	PollTimeoutSec    int
-	NotifyIntervalSec int
-	OffsetFile        string
-	BaseURL           string
-	Client            *http.Client
-	Out               io.Writer
-	OnCommand         TelegramCommandHandler
-	OnNotifyTick      TelegramNotifyHandler
+	Token              string
+	AllowedChatIDs     map[int64]struct{}
+	AllowedUserIDs     map[int64]struct{}
+	PollTimeoutSec     int
+	NotifyIntervalSec  int
+	CommandTimeoutSec  int
+	CommandConcurrency int
+	OffsetFile         string
+	BaseURL            string
+	Client             *http.Client
+	Out                io.Writer
+	OnCommand          TelegramCommandHandler
+	OnNotifyTick       TelegramNotifyHandler
 }
 
 type telegramGetUpdatesResponse struct {
@@ -89,6 +91,14 @@ func RunTelegramBot(ctx context.Context, opts TelegramBotOptions) error {
 	if notifyIntervalSec <= 0 {
 		notifyIntervalSec = 30
 	}
+	commandTimeoutSec := opts.CommandTimeoutSec
+	if commandTimeoutSec <= 0 {
+		commandTimeoutSec = 300
+	}
+	commandConcurrency := opts.CommandConcurrency
+	if commandConcurrency <= 0 {
+		commandConcurrency = 4
+	}
 
 	baseURL := strings.TrimSpace(opts.BaseURL)
 	if baseURL == "" {
@@ -116,6 +126,7 @@ func RunTelegramBot(ctx context.Context, opts TelegramBotOptions) error {
 	chatIDs := sortedTelegramChatIDs(opts.AllowedChatIDs)
 	unauthorizedLogCooldown := 60 * time.Second
 	lastUnauthorizedLogAt := map[string]time.Time{}
+	commandSlots := make(chan struct{}, commandConcurrency)
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -182,21 +193,18 @@ func RunTelegramBot(ctx context.Context, opts TelegramBotOptions) error {
 				continue
 			}
 
-			reply, cmdErr := opts.OnCommand(ctx, chatID, text)
-			if cmdErr != nil {
-				reply = "error: " + compactTelegramError(cmdErr.Error())
-			}
-			reply = strings.TrimSpace(reply)
-			if reply == "" {
-				continue
-			}
-
-			for _, chunk := range splitTelegramMessage(reply, 3500) {
-				if sendErr := telegramSendMessage(ctx, client, baseURL, token, chatID, chunk); sendErr != nil {
-					fmt.Fprintf(out, "[telegram] warning: sendMessage failed chat=%d: %v\n", chatID, sendErr)
-					break
-				}
-			}
+			dispatchTelegramCommand(
+				ctx,
+				commandSlots,
+				time.Duration(commandTimeoutSec)*time.Second,
+				opts.OnCommand,
+				client,
+				baseURL,
+				token,
+				chatID,
+				text,
+				out,
+			)
 		}
 
 		if nextOffset > offset {
@@ -206,6 +214,59 @@ func RunTelegramBot(ctx context.Context, opts TelegramBotOptions) error {
 			}
 		}
 	}
+}
+
+func dispatchTelegramCommand(
+	ctx context.Context,
+	commandSlots chan struct{},
+	commandTimeout time.Duration,
+	onCommand TelegramCommandHandler,
+	client *http.Client,
+	baseURL, token string,
+	chatID int64,
+	text string,
+	out io.Writer,
+) {
+	select {
+	case commandSlots <- struct{}{}:
+	case <-ctx.Done():
+		return
+	default:
+		busy := "system busy: processing previous commands. please retry in a few seconds."
+		if err := telegramSendMessage(ctx, client, baseURL, token, chatID, busy); err != nil {
+			fmt.Fprintf(out, "[telegram] warning: queue full and busy notice send failed chat=%d: %v\n", chatID, err)
+		}
+		fmt.Fprintf(out, "[telegram] warning: command queue full; dropped chat=%d text=%q\n", chatID, compactTelegramError(text))
+		return
+	}
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(out, "[telegram] warning: command panic chat=%d: %v\n", chatID, r)
+			}
+			<-commandSlots
+		}()
+
+		cmdCtx, cancel := context.WithTimeout(ctx, commandTimeout)
+		defer cancel()
+
+		reply, cmdErr := onCommand(cmdCtx, chatID, text)
+		if cmdErr != nil {
+			reply = "error: " + compactTelegramError(cmdErr.Error())
+		}
+		reply = strings.TrimSpace(reply)
+		if reply == "" {
+			return
+		}
+
+		for _, chunk := range splitTelegramMessage(reply, 3500) {
+			if sendErr := telegramSendMessage(cmdCtx, client, baseURL, token, chatID, chunk); sendErr != nil {
+				fmt.Fprintf(out, "[telegram] warning: sendMessage failed chat=%d: %v\n", chatID, sendErr)
+				break
+			}
+		}
+	}()
 }
 
 func sortedTelegramChatIDs(chats map[int64]struct{}) []int64 {

@@ -1,6 +1,16 @@
 package ralph
 
-import "testing"
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 func TestParseTelegramChatIDs(t *testing.T) {
 	t.Parallel()
@@ -115,5 +125,118 @@ func TestIsTelegramUserAllowed(t *testing.T) {
 	}
 	if isTelegramUserAllowed(allowed, 0) {
 		t.Fatalf("zero user id should be rejected when allowlist is set")
+	}
+}
+
+func TestDispatchTelegramCommandQueueFullSendsBusyMessage(t *testing.T) {
+	t.Parallel()
+
+	requests := make(chan telegramSendMessageRequest, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req telegramSendMessageRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		requests <- req
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	slots := make(chan struct{}, 1)
+	slots <- struct{}{} // force queue-full path
+
+	var handlerCalled int32
+	dispatchTelegramCommand(
+		ctx,
+		slots,
+		2*time.Second,
+		func(ctx context.Context, chatID int64, text string) (string, error) {
+			atomic.AddInt32(&handlerCalled, 1)
+			return "pong", nil
+		},
+		server.Client(),
+		server.URL,
+		"token",
+		123,
+		"/ping",
+		io.Discard,
+	)
+
+	select {
+	case req := <-requests:
+		if req.ChatID != 123 {
+			t.Fatalf("busy notice chat mismatch: got=%d want=123", req.ChatID)
+		}
+		if !strings.HasPrefix(req.Text, "system busy") {
+			t.Fatalf("expected busy notice, got=%q", req.Text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("expected busy notice to be sent")
+	}
+
+	if atomic.LoadInt32(&handlerCalled) != 0 {
+		t.Fatalf("handler should not run when queue is full")
+	}
+}
+
+func TestDispatchTelegramCommandAsyncExecutesHandler(t *testing.T) {
+	t.Parallel()
+
+	requests := make(chan telegramSendMessageRequest, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req telegramSendMessageRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		requests <- req
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	slots := make(chan struct{}, 1)
+	dispatchTelegramCommand(
+		ctx,
+		slots,
+		2*time.Second,
+		func(ctx context.Context, chatID int64, text string) (string, error) {
+			return "pong async", nil
+		},
+		server.Client(),
+		server.URL,
+		"token",
+		77,
+		"/ping",
+		io.Discard,
+	)
+
+	select {
+	case req := <-requests:
+		if req.ChatID != 77 {
+			t.Fatalf("reply chat mismatch: got=%d want=77", req.ChatID)
+		}
+		if req.Text != "pong async" {
+			t.Fatalf("reply text mismatch: got=%q want=%q", req.Text, "pong async")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("expected async reply to be sent")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		select {
+		case slots <- struct{}{}:
+			return
+		default:
+			if time.Now().After(deadline) {
+				t.Fatalf("command slot should be released after handler completes")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }

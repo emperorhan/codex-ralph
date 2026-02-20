@@ -8,8 +8,10 @@ telegram.offset
 
 # Local fleet state variants
 fleet/projects.local.json
+fleet/projects.json
 
 # Build and coverage artifacts
+/ralphctl
 bin/
 dist/
 coverage.out

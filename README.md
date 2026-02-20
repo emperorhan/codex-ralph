@@ -238,6 +238,13 @@ PRD wizard 빠른 흐름:
 5. `/prd apply` (점수 미달이면 `/prd refine` 유도)
 6. 필요 시 `/prd approve`로 apply gate override 가능
 
+대화형 입력 팁:
+
+- refine 중에 질문형 입력(`포함 범위가 뭐야?`)을 보내면 단계를 유지한 채 설명을 반환합니다.
+- 추천 요청(`제외 범위 추천해줘`)을 보내면 현재 단계 기준 추천안을 반환합니다.
+- refine 입력 의도(`답변/설명/추천`)는 Codex가 우선 판단합니다.
+- `/prd score`, `/prd apply`의 게이트 점수는 Codex 점수를 우선 사용합니다(불가 시 heuristic 폴백).
+
 ### 4) 실행 중 graceful 설정 변경
 
 `profile.local.yaml`을 수정하면 실행 중인 루프가 자동으로 재로딩합니다(다음 loop부터 반영).
