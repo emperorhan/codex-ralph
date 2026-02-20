@@ -64,6 +64,86 @@ func TestShouldRunWatchdogScan(t *testing.T) {
 	}
 }
 
+func TestShouldDetectBusyWait(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		owner          bool
+		detectLoops    int
+		idleCount      int
+		readyCount     int
+		inProgress     int
+		wantDetectBusy bool
+	}{
+		{
+			name:           "disabled for non-owner",
+			owner:          false,
+			detectLoops:    3,
+			idleCount:      3,
+			readyCount:     1,
+			inProgress:     0,
+			wantDetectBusy: false,
+		},
+		{
+			name:           "disabled for non-multiple loop",
+			owner:          true,
+			detectLoops:    3,
+			idleCount:      4,
+			readyCount:     1,
+			inProgress:     0,
+			wantDetectBusy: false,
+		},
+		{
+			name:           "idle project should not be detected as stuck",
+			owner:          true,
+			detectLoops:    3,
+			idleCount:      6,
+			readyCount:     0,
+			inProgress:     0,
+			wantDetectBusy: false,
+		},
+		{
+			name:           "ready work should be detected",
+			owner:          true,
+			detectLoops:    3,
+			idleCount:      6,
+			readyCount:     2,
+			inProgress:     0,
+			wantDetectBusy: true,
+		},
+		{
+			name:           "stale in-progress should be detected",
+			owner:          true,
+			detectLoops:    3,
+			idleCount:      6,
+			readyCount:     0,
+			inProgress:     1,
+			wantDetectBusy: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := shouldDetectBusyWait(tt.owner, tt.detectLoops, tt.idleCount, tt.readyCount, tt.inProgress)
+			if got != tt.wantDetectBusy {
+				t.Fatalf(
+					"shouldDetectBusyWait(owner=%t,loops=%d,idle=%d,ready=%d,inProgress=%d)=%t want=%t",
+					tt.owner,
+					tt.detectLoops,
+					tt.idleCount,
+					tt.readyCount,
+					tt.inProgress,
+					got,
+					tt.wantDetectBusy,
+				)
+			}
+		})
+	}
+}
+
 func TestCanRunBusyWaitSelfHeal(t *testing.T) {
 	t.Parallel()
 

@@ -81,3 +81,20 @@ func TestLatestBlockedFailure(t *testing.T) {
 		t.Fatalf("latestBlockedFailure should return non-empty fields")
 	}
 }
+
+func TestIsInputRequiredStatus(t *testing.T) {
+	t.Parallel()
+
+	if !IsInputRequiredStatus(Status{QueueReady: 0, InProgress: 0, Blocked: 0}) {
+		t.Fatalf("empty queue should require input")
+	}
+	if IsInputRequiredStatus(Status{QueueReady: 1, InProgress: 0, Blocked: 0}) {
+		t.Fatalf("ready queue should not require input")
+	}
+	if IsInputRequiredStatus(Status{QueueReady: 0, InProgress: 1, Blocked: 0}) {
+		t.Fatalf("in-progress queue should not require input")
+	}
+	if IsInputRequiredStatus(Status{QueueReady: 0, InProgress: 0, Blocked: 1}) {
+		t.Fatalf("blocked queue should not require input")
+	}
+}

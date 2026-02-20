@@ -175,10 +175,14 @@ func RunLoop(ctx context.Context, paths Paths, profile Profile, opts RunOptions)
 
 			idleCount++
 
-			if busyWaitOwner && activeProfile.BusyWaitDetectLoops > 0 && idleCount >= activeProfile.BusyWaitDetectLoops && idleCount%activeProfile.BusyWaitDetectLoops == 0 {
+			readyBefore, _ := CountReadyIssues(paths)
+			inProgressBefore, _ := CountIssueFiles(paths.InProgressDir)
+			blockedBefore, _ := CountIssueFiles(paths.BlockedDir)
+			if idleCount == 1 && readyBefore == 0 && inProgressBefore == 0 && blockedBefore == 0 {
+				fmt.Fprintln(opts.Stdout, "[ralph-loop] input required: no queued work. add issue (`./ralph new ...`) or import PRD (`./ralph import-prd --file prd.json`)")
+			}
+			if shouldDetectBusyWait(busyWaitOwner, activeProfile.BusyWaitDetectLoops, idleCount, readyBefore, inProgressBefore) {
 				now := time.Now().UTC()
-				readyBefore, _ := CountReadyIssues(paths)
-				inProgressBefore, _ := CountIssueFiles(paths.InProgressDir)
 				fmt.Fprintf(opts.Stdout, "[ralph-loop] busy-wait detected (idle_count=%d, ready=%d, in_progress=%d, role_scope=%s)\n", idleCount, readyBefore, inProgressBefore, roleScopeOrAll(roleScope))
 
 				busyState.LastDetectedAt = now
@@ -784,6 +788,17 @@ func shouldRunWatchdogScan(tickCount, scanLoops int) bool {
 		return true
 	}
 	return tickCount%scanLoops == 0
+}
+
+func shouldDetectBusyWait(owner bool, detectLoops, idleCount, readyCount, inProgressCount int) bool {
+	if !owner || detectLoops <= 0 {
+		return false
+	}
+	if idleCount < detectLoops || idleCount%detectLoops != 0 {
+		return false
+	}
+	// Empty queue without any active work is an idle state, not a stuck state.
+	return readyCount > 0 || inProgressCount > 0
 }
 
 func canRunBusyWaitSelfHeal(now time.Time, state BusyWaitState, profile Profile) (bool, string) {

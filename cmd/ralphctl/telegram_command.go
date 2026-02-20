@@ -856,6 +856,10 @@ func formatStatusForTelegram(st ralph.Status) string {
 	fmt.Fprintf(&b, "- daemon: %s\n", st.Daemon)
 	fmt.Fprintf(&b, "- queue: ready=%d in_progress=%d done=%d blocked=%d\n", st.QueueReady, st.InProgress, st.Done, st.Blocked)
 	fmt.Fprintf(&b, "- next_ready: %s\n", st.NextReady)
+	if ralph.IsInputRequiredStatus(st) {
+		fmt.Fprintf(&b, "- input_required: true\n")
+		fmt.Fprintf(&b, "- input_hint: add issue (`./ralph new ...`) or import PRD (`./ralph import-prd --file prd.json`)\n")
+	}
 	if st.LastProfileReloadAt != "" || st.ProfileReloadCount > 0 {
 		fmt.Fprintf(&b, "- profile_reload_at: %s\n", valueOrDash(st.LastProfileReloadAt))
 		fmt.Fprintf(&b, "- profile_reload_count: %d\n", st.ProfileReloadCount)
@@ -1104,7 +1108,9 @@ func buildStatusAlerts(prev, current ralph.Status, retryThreshold, permThreshold
 		))
 	}
 
-	if current.LastBusyWaitDetectedAt != "" && current.LastBusyWaitDetectedAt != prev.LastBusyWaitDetectedAt {
+	if current.LastBusyWaitDetectedAt != "" &&
+		current.LastBusyWaitDetectedAt != prev.LastBusyWaitDetectedAt &&
+		(current.QueueReady > 0 || current.InProgress > 0) {
 		out = append(out, fmt.Sprintf(
 			"[ralph alert][stuck]\n- project: %s\n- busywait_detected_at: %s\n- idle_count: %d",
 			project,
@@ -1120,6 +1126,12 @@ func buildStatusAlerts(prev, current ralph.Status, retryThreshold, permThreshold
 			current.LastPermissionStreak,
 			permThreshold,
 			valueOrDash(compactSingleLine(current.LastFailureCause, 160)),
+		))
+	}
+	if ralph.IsInputRequiredStatus(current) && !ralph.IsInputRequiredStatus(prev) {
+		out = append(out, fmt.Sprintf(
+			"[ralph alert][input_required]\n- project: %s\n- message: no queued work. add issue (`./ralph new ...`) or import PRD (`./ralph import-prd --file prd.json`)",
+			project,
 		))
 	}
 

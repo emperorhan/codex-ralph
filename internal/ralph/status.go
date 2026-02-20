@@ -40,6 +40,10 @@ type Status struct {
 	LastPermissionStreak   int
 }
 
+func IsInputRequiredStatus(s Status) bool {
+	return s.QueueReady == 0 && s.InProgress == 0 && s.Blocked == 0
+}
+
 var codexAttemptHeaderPattern = regexp.MustCompile(`codex attempt [0-9]+/[0-9]+`)
 
 func GetStatus(paths Paths) (Status, error) {
@@ -165,6 +169,10 @@ func (s Status) Print(w io.Writer) {
 	fmt.Fprintf(w, "- done: %d\n", s.Done)
 	fmt.Fprintf(w, "- blocked: %d\n", s.Blocked)
 	fmt.Fprintf(w, "- next_ready: %s\n", s.NextReady)
+	if IsInputRequiredStatus(s) {
+		fmt.Fprintln(w, "- input_required: true")
+		fmt.Fprintln(w, "- input_hint: add issue (`./ralph new ...`) or import PRD (`./ralph import-prd --file prd.json`)")
+	}
 	if s.LastBusyWaitDetectedAt != "" {
 		fmt.Fprintf(w, "- last_busywait_detected_at: %s\n", s.LastBusyWaitDetectedAt)
 		fmt.Fprintf(w, "- last_busywait_idle_count: %d\n", s.LastBusyWaitIdleCount)

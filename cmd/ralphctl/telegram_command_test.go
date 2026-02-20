@@ -232,6 +232,8 @@ func TestBuildStatusAlerts(t *testing.T) {
 	}
 	curr := ralph.Status{
 		ProjectDir:             "/tmp/p",
+		QueueReady:             1,
+		InProgress:             1,
 		Blocked:                2,
 		LastFailureCause:       "codex_failed_after_3_attempts",
 		LastFailureUpdatedAt:   "2026-02-20T08:10:00Z",
@@ -257,6 +259,51 @@ func TestBuildStatusAlerts(t *testing.T) {
 	}
 	if !strings.Contains(joined, "[permission]") {
 		t.Fatalf("missing permission alert: %q", joined)
+	}
+}
+
+func TestBuildStatusAlertsSkipsStuckWhenNoWork(t *testing.T) {
+	t.Parallel()
+
+	prev := ralph.Status{
+		ProjectDir:             "/tmp/p",
+		LastBusyWaitDetectedAt: "",
+	}
+	curr := ralph.Status{
+		ProjectDir:             "/tmp/p",
+		QueueReady:             0,
+		InProgress:             0,
+		LastBusyWaitDetectedAt: "2026-02-20T10:00:00Z",
+		LastBusyWaitIdleCount:  12,
+	}
+
+	alerts := buildStatusAlerts(prev, curr, 2, 3)
+	joined := strings.Join(alerts, "\n")
+	if strings.Contains(joined, "[stuck]") {
+		t.Fatalf("stuck alert should be suppressed when queue is empty: %q", joined)
+	}
+}
+
+func TestBuildStatusAlertsInputRequiredTransition(t *testing.T) {
+	t.Parallel()
+
+	prev := ralph.Status{
+		ProjectDir: "/tmp/p",
+		QueueReady: 1,
+		InProgress: 0,
+		Blocked:    0,
+	}
+	curr := ralph.Status{
+		ProjectDir: "/tmp/p",
+		QueueReady: 0,
+		InProgress: 0,
+		Blocked:    0,
+	}
+
+	alerts := buildStatusAlerts(prev, curr, 2, 3)
+	joined := strings.Join(alerts, "\n")
+	if !strings.Contains(joined, "[input_required]") {
+		t.Fatalf("input_required alert should be emitted on transition: %q", joined)
 	}
 }
 
