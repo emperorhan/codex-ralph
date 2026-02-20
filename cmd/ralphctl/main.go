@@ -114,12 +114,13 @@ func run() error {
 		if err := ralph.Install(paths, *plugin, exe); err != nil {
 			return err
 		}
-		fmt.Println("installed ralph runtime")
-		fmt.Printf("- control_dir: %s\n", paths.ControlDir)
-		fmt.Printf("- project_dir: %s\n", paths.ProjectDir)
-		fmt.Printf("- plugin: %s\n", *plugin)
-		fmt.Printf("- helper: %s\n", filepath.Join(paths.ProjectDir, "ralph"))
-		fmt.Printf("- profile_yaml: %s\n", paths.ProfileYAMLFile)
+		fmt.Println("Ralph Runtime Installed")
+		fmt.Println("=======================")
+		fmt.Printf("Control Dir:  %s\n", paths.ControlDir)
+		fmt.Printf("Project Dir:  %s\n", paths.ProjectDir)
+		fmt.Printf("Plugin:       %s\n", *plugin)
+		fmt.Printf("Helper:       %s\n", filepath.Join(paths.ProjectDir, "ralph"))
+		fmt.Printf("Profile YAML: %s\n", paths.ProfileYAMLFile)
 		return nil
 
 	case "apply-plugin":
@@ -134,9 +135,11 @@ func run() error {
 		if err := ralph.ApplyPlugin(paths, *plugin); err != nil {
 			return err
 		}
-		fmt.Printf("applied plugin: %s\n", *plugin)
-		fmt.Printf("profile_yaml: %s\n", paths.ProfileYAMLFile)
-		fmt.Printf("profile_env_override: %s\n", paths.ProfileFile)
+		fmt.Println("Plugin Applied")
+		fmt.Println("==============")
+		fmt.Printf("Plugin:            %s\n", *plugin)
+		fmt.Printf("Profile YAML:      %s\n", paths.ProfileYAMLFile)
+		fmt.Printf("Profile Override:  %s\n", paths.ProfileFile)
 		return nil
 
 	case "setup":
@@ -181,14 +184,17 @@ func run() error {
 		if err := ralph.ApplyStabilityDefaults(paths); err != nil {
 			return err
 		}
-		fmt.Println("setup complete")
-		fmt.Printf("- helper: %s\n", filepath.Join(paths.ProjectDir, "ralph"))
-		fmt.Printf("- profile_yaml: %s\n", paths.ProfileYAMLFile)
-		fmt.Printf("- profile_local_yaml: %s\n", paths.ProfileLocalYAMLFile)
-		fmt.Printf("- profile_env_override: %s\n", paths.ProfileLocalFile)
-		fmt.Println("- stability_defaults: timeout/retry + watchdog + supervisor enabled")
-		fmt.Println("- graceful_reload: runtime loop values apply automatically while running (loop boundary)")
-		fmt.Println("- restart_required: supervisor settings")
+		fmt.Println("Setup Complete")
+		fmt.Println("==============")
+		fmt.Printf("Helper:                %s\n", filepath.Join(paths.ProjectDir, "ralph"))
+		fmt.Printf("Profile YAML:          %s\n", paths.ProfileYAMLFile)
+		fmt.Printf("Profile Local YAML:    %s\n", paths.ProfileLocalYAMLFile)
+		fmt.Printf("Profile Env Override:  %s\n", paths.ProfileLocalFile)
+		fmt.Println()
+		fmt.Println("Defaults")
+		fmt.Println("- timeout/retry + watchdog + supervisor: enabled")
+		fmt.Println("- runtime profile reload: automatic (loop boundary)")
+		fmt.Println("- supervisor settings changes: daemon restart required")
 		if *startAfter {
 			startResult, err := startProjectDaemon(paths, startOptions{
 				DoctorRepair: true,
@@ -198,7 +204,7 @@ func run() error {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("- daemon: %s\n", startResult)
+			fmt.Printf("Daemon: %s\n", startResult)
 		}
 		return nil
 
@@ -358,6 +364,8 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		fmt.Println("Ralph Loop")
+		fmt.Println("==========")
 		fmt.Println(startResult)
 		return nil
 
@@ -365,6 +373,8 @@ func run() error {
 		if err := ralph.StopDaemon(paths); err != nil {
 			return err
 		}
+		fmt.Println("Ralph Loop")
+		fmt.Println("==========")
 		fmt.Println("ralph-loop stopped")
 		return nil
 
@@ -376,6 +386,8 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		fmt.Println("Ralph Loop")
+		fmt.Println("==========")
 		fmt.Printf("ralph-loop restarted (pid=%d)\n", pid)
 		return nil
 

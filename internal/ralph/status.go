@@ -155,57 +155,70 @@ func GetStatus(paths Paths) (Status, error) {
 }
 
 func (s Status) Print(w io.Writer) {
-	fmt.Fprintln(w, "## Ralph Status")
-	fmt.Fprintf(w, "- updated_utc: %s\n", s.UpdatedUTC.Format(time.RFC3339))
-	fmt.Fprintf(w, "- project: %s\n", s.ProjectDir)
-	fmt.Fprintf(w, "- plugin: %s\n", s.PluginName)
-	fmt.Fprintf(w, "- enabled: %t\n", s.Enabled)
-	fmt.Fprintf(w, "- daemon: %s\n", s.Daemon)
+	fmt.Fprintln(w, "Ralph Status")
+	fmt.Fprintln(w, "============")
+	fmt.Fprintf(w, "Updated: %s\n\n", s.UpdatedUTC.Format(time.RFC3339))
+
+	fmt.Fprintln(w, "[Project]")
+	fmt.Fprintf(w, "Path:    %s\n", s.ProjectDir)
+	fmt.Fprintf(w, "Plugin:  %s\n", s.PluginName)
+	fmt.Fprintf(w, "Enabled: %t\n", s.Enabled)
+	fmt.Fprintf(w, "Daemon:  %s\n", s.Daemon)
 	if len(s.DaemonRoles) > 0 {
-		fmt.Fprintf(w, "- daemon_roles: %s\n", strings.Join(s.DaemonRoles, ","))
+		fmt.Fprintf(w, "Workers: %s\n", strings.Join(s.DaemonRoles, ","))
 	}
-	fmt.Fprintf(w, "- queue_ready: %d\n", s.QueueReady)
-	fmt.Fprintf(w, "- in_progress: %d\n", s.InProgress)
-	fmt.Fprintf(w, "- done: %d\n", s.Done)
-	fmt.Fprintf(w, "- blocked: %d\n", s.Blocked)
-	fmt.Fprintf(w, "- next_ready: %s\n", s.NextReady)
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[Queue]")
+	fmt.Fprintf(w, "Ready:       %d\n", s.QueueReady)
+	fmt.Fprintf(w, "In Progress: %d\n", s.InProgress)
+	fmt.Fprintf(w, "Done:        %d\n", s.Done)
+	fmt.Fprintf(w, "Blocked:     %d\n", s.Blocked)
+	fmt.Fprintf(w, "Next:        %s\n", s.NextReady)
 	if IsInputRequiredStatus(s) {
-		fmt.Fprintln(w, "- input_required: true")
-		fmt.Fprintln(w, "- input_hint: add issue (`./ralph new ...`) or import PRD (`./ralph import-prd --file prd.json`)")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "[Input Required]")
+		fmt.Fprintln(w, "No queued work detected.")
+		fmt.Fprintln(w, "Next actions:")
+		fmt.Fprintln(w, "  - ./ralph new developer \"<title>\"")
+		fmt.Fprintln(w, "  - ./ralph import-prd --file prd.json")
 	}
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "[Runtime]")
 	if s.LastBusyWaitDetectedAt != "" {
-		fmt.Fprintf(w, "- last_busywait_detected_at: %s\n", s.LastBusyWaitDetectedAt)
-		fmt.Fprintf(w, "- last_busywait_idle_count: %d\n", s.LastBusyWaitIdleCount)
+		fmt.Fprintf(w, "Busywait Detected At: %s\n", s.LastBusyWaitDetectedAt)
+		fmt.Fprintf(w, "Busywait Idle Count:  %d\n", s.LastBusyWaitIdleCount)
 	}
 	if s.LastSelfHealAt != "" {
-		fmt.Fprintf(w, "- last_self_heal_at: %s\n", s.LastSelfHealAt)
+		fmt.Fprintf(w, "Last Self Heal At:    %s\n", s.LastSelfHealAt)
 	}
 	if s.SelfHealAttempts > 0 {
-		fmt.Fprintf(w, "- self_heal_attempts: %d\n", s.SelfHealAttempts)
+		fmt.Fprintf(w, "Self Heal Attempts:   %d\n", s.SelfHealAttempts)
 	}
 	if s.LastSelfHealResult != "" {
-		fmt.Fprintf(w, "- last_self_heal_result: %s\n", s.LastSelfHealResult)
+		fmt.Fprintf(w, "Last Self Heal:       %s\n", s.LastSelfHealResult)
 	}
 	if s.LastSelfHealError != "" {
-		fmt.Fprintf(w, "- last_self_heal_error: %s\n", s.LastSelfHealError)
+		fmt.Fprintf(w, "Last Self Heal Error: %s\n", s.LastSelfHealError)
 	}
 	if s.LastProfileReloadAt != "" {
-		fmt.Fprintf(w, "- last_profile_reload_at: %s\n", s.LastProfileReloadAt)
+		fmt.Fprintf(w, "Profile Reload At:    %s\n", s.LastProfileReloadAt)
 	}
 	if s.ProfileReloadCount > 0 {
-		fmt.Fprintf(w, "- profile_reload_count: %d\n", s.ProfileReloadCount)
+		fmt.Fprintf(w, "Profile Reload Count: %d\n", s.ProfileReloadCount)
 	}
 	if s.LastFailureCause != "" {
-		fmt.Fprintf(w, "- last_failure_cause: %s\n", s.LastFailureCause)
+		fmt.Fprintf(w, "Last Failure Cause:   %s\n", s.LastFailureCause)
 	}
 	if s.LastFailureUpdatedAt != "" {
-		fmt.Fprintf(w, "- last_failure_updated_at: %s\n", s.LastFailureUpdatedAt)
+		fmt.Fprintf(w, "Last Failure At:      %s\n", s.LastFailureUpdatedAt)
 	}
 	if s.LastCodexRetryCount > 0 {
-		fmt.Fprintf(w, "- last_codex_retry_count: %d\n", s.LastCodexRetryCount)
+		fmt.Fprintf(w, "Codex Retries:        %d\n", s.LastCodexRetryCount)
 	}
 	if s.LastPermissionStreak > 0 {
-		fmt.Fprintf(w, "- last_permission_error_streak: %d\n", s.LastPermissionStreak)
+		fmt.Fprintf(w, "Permission Streak:    %d\n", s.LastPermissionStreak)
 	}
 }
 

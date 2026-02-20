@@ -108,35 +108,44 @@ func runTelegramRunCommand(controlDir string, paths ralph.Paths, args []string) 
 		if err != nil {
 			return err
 		}
+		fmt.Println("Telegram Daemon")
+		fmt.Println("===============")
 		fmt.Println(msg)
-		fmt.Printf("- control_dir: %s\n", controlDir)
-		fmt.Printf("- project_dir: %s\n", paths.ProjectDir)
-		fmt.Printf("- config_file: %s\n", configFile)
-		fmt.Printf("- pid_file: %s\n", paths.TelegramPIDFile())
-		fmt.Printf("- log_file: %s\n", paths.TelegramLogFile())
-		fmt.Println("- mode: daemon")
-		fmt.Println("- hint: stop with `ralphctl telegram stop`, logs with `ralphctl telegram tail`")
+		fmt.Println()
+		fmt.Printf("Control Dir: %s\n", controlDir)
+		fmt.Printf("Project Dir: %s\n", paths.ProjectDir)
+		fmt.Printf("Config:      %s\n", configFile)
+		fmt.Printf("PID File:    %s\n", paths.TelegramPIDFile())
+		fmt.Printf("Log File:    %s\n", paths.TelegramLogFile())
+		fmt.Println("Mode:        daemon")
+		fmt.Println()
+		fmt.Println("Quick Commands")
+		fmt.Println("- stop:   ralphctl telegram stop")
+		fmt.Println("- status: ralphctl telegram status")
+		fmt.Println("- logs:   ralphctl telegram tail")
 		return nil
 	}
 
-	fmt.Println("telegram bot started")
-	fmt.Printf("- control_dir: %s\n", controlDir)
-	fmt.Printf("- project_dir: %s\n", paths.ProjectDir)
-	fmt.Printf("- config_file: %s\n", configFile)
-	fmt.Println("- mode: foreground")
-	fmt.Printf("- allow_control: %t\n", *allowControl)
-	fmt.Printf("- notify: %t\n", *enableNotify)
-	fmt.Printf("- notify_scope: %s\n", resolvedNotifyScope)
-	fmt.Printf("- notify_interval_sec: %d\n", *notifyIntervalSec)
-	fmt.Printf("- notify_retry_threshold: %d\n", *notifyRetryThreshold)
-	fmt.Printf("- notify_perm_streak_threshold: %d\n", *notifyPermStreakThreshold)
-	fmt.Printf("- allowed_chats: %d\n", len(allowedChatIDs))
+	fmt.Println("Telegram Bot")
+	fmt.Println("============")
+	fmt.Println("Started in foreground mode")
+	fmt.Println()
+	fmt.Printf("Control Dir:   %s\n", controlDir)
+	fmt.Printf("Project Dir:   %s\n", paths.ProjectDir)
+	fmt.Printf("Config:        %s\n", configFile)
+	fmt.Printf("Allow Control: %t\n", *allowControl)
+	fmt.Printf("Notify:        %t\n", *enableNotify)
+	fmt.Printf("Notify Scope:  %s\n", resolvedNotifyScope)
+	fmt.Printf("Notify Every:  %ds\n", *notifyIntervalSec)
+	fmt.Printf("Retry Alert:   %d\n", *notifyRetryThreshold)
+	fmt.Printf("Perm Alert:    %d\n", *notifyPermStreakThreshold)
+	fmt.Printf("Allowed Chats: %d\n", len(allowedChatIDs))
 	if len(allowedUserIDs) > 0 {
-		fmt.Printf("- allowed_users: %d\n", len(allowedUserIDs))
+		fmt.Printf("Allowed Users: %d\n", len(allowedUserIDs))
 	} else {
-		fmt.Printf("- allowed_users: any (chat allowlist only)\n")
+		fmt.Printf("Allowed Users: any (chat allowlist only)\n")
 	}
-	fmt.Printf("- offset_file: %s\n", *offsetFile)
+	fmt.Printf("Offset File:   %s\n", *offsetFile)
 
 	notifyHandler := ralph.TelegramNotifyHandler(nil)
 	if *enableNotify {
@@ -182,19 +191,20 @@ func runTelegramStatusCommand(controlDir string, paths ralph.Paths, args []strin
 	}
 
 	pid, running, stale := telegramPIDState(paths.TelegramPIDFile())
-	fmt.Println("## Telegram Bot Status")
-	fmt.Printf("- control_dir: %s\n", controlDir)
-	fmt.Printf("- project_dir: %s\n", paths.ProjectDir)
-	fmt.Printf("- pid_file: %s\n", paths.TelegramPIDFile())
-	fmt.Printf("- log_file: %s\n", paths.TelegramLogFile())
-	fmt.Printf("- offset_file: %s\n", strings.TrimSpace(*offsetFile))
+	fmt.Println("Telegram Status")
+	fmt.Println("===============")
+	fmt.Printf("Control Dir: %s\n", controlDir)
+	fmt.Printf("Project Dir: %s\n", paths.ProjectDir)
+	fmt.Printf("PID File:    %s\n", paths.TelegramPIDFile())
+	fmt.Printf("Log File:    %s\n", paths.TelegramLogFile())
+	fmt.Printf("Offset File: %s\n", strings.TrimSpace(*offsetFile))
 	switch {
 	case running:
-		fmt.Printf("- daemon: running(pid=%d)\n", pid)
+		fmt.Printf("Daemon:      running (pid=%d)\n", pid)
 	case stale:
-		fmt.Printf("- daemon: stopped(stale_pid=%d)\n", pid)
+		fmt.Printf("Daemon:      stopped (stale pid=%d)\n", pid)
 	default:
-		fmt.Println("- daemon: stopped")
+		fmt.Println("Daemon:      stopped")
 	}
 	return nil
 }
@@ -360,14 +370,17 @@ func runTelegramSetupCommand(controlDir string, args []string) error {
 		return err
 	}
 
-	fmt.Println("telegram setup complete")
-	fmt.Printf("- config_file: %s\n", configFile)
-	fmt.Printf("- allow_control: %t\n", final.AllowControl)
-	fmt.Printf("- notify: %t\n", final.Notify)
-	fmt.Printf("- notify_scope: %s\n", final.NotifyScope)
-	fmt.Printf("- run: ralphctl --project-dir \"$PWD\" telegram run --config-file %s\n", configFile)
+	fmt.Println("Telegram Setup Complete")
+	fmt.Println("======================")
+	fmt.Printf("Config:        %s\n", configFile)
+	fmt.Printf("Allow Control: %t\n", final.AllowControl)
+	fmt.Printf("Notify:        %t\n", final.Notify)
+	fmt.Printf("Notify Scope:  %s\n", final.NotifyScope)
+	fmt.Println()
+	fmt.Println("Next Commands")
+	fmt.Printf("- run:    ralphctl --project-dir \"$PWD\" telegram run --config-file %s\n", configFile)
 	fmt.Printf("- status: ralphctl --project-dir \"$PWD\" telegram status\n")
-	fmt.Printf("- stop: ralphctl --project-dir \"$PWD\" telegram stop\n")
+	fmt.Printf("- stop:   ralphctl --project-dir \"$PWD\" telegram stop\n")
 	return nil
 }
 
@@ -908,6 +921,9 @@ func telegramPRDCommand(controlDir string, paths ralph.Paths, chatID int64, rawA
 func telegramPRDHelp() string {
 	return strings.Join([]string{
 		"Ralph PRD Wizard",
+		"================",
+		"",
+		"Commands",
 		"- /prd start [product_name]",
 		"- /prd preview",
 		"- /prd save [file]",
@@ -1375,7 +1391,10 @@ func parseTelegramCommandLine(raw string) (string, string) {
 
 func buildTelegramHelp(allowControl bool) string {
 	lines := []string{
-		"Ralph Telegram commands",
+		"Ralph Bot Commands",
+		"==================",
+		"",
+		"Read",
 		"- /help",
 		"- /ping",
 		"- /status [all|<project_id>]",
@@ -1384,16 +1403,20 @@ func buildTelegramHelp(allowControl bool) string {
 	}
 	if allowControl {
 		lines = append(lines,
+			"",
+			"Control",
 			"- /start [all|<project_id>]",
 			"- /stop [all|<project_id>]",
 			"- /restart [all|<project_id>]",
 			"- /doctor_repair [all|<project_id>]",
 			"- /recover [all|<project_id>]",
 			"- /new [role] <title> (default role: developer)",
+			"",
+			"PRD Wizard",
 			"- /prd help",
 		)
 	} else {
-		lines = append(lines, "- control commands disabled (--allow-control)")
+		lines = append(lines, "", "Control", "- disabled (--allow-control=false)")
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1401,23 +1424,34 @@ func buildTelegramHelp(allowControl bool) string {
 func formatStatusForTelegram(st ralph.Status) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Ralph Status\n")
-	fmt.Fprintf(&b, "- project: %s\n", st.ProjectDir)
-	fmt.Fprintf(&b, "- plugin: %s\n", st.PluginName)
-	fmt.Fprintf(&b, "- daemon: %s\n", st.Daemon)
-	fmt.Fprintf(&b, "- queue: ready=%d in_progress=%d done=%d blocked=%d\n", st.QueueReady, st.InProgress, st.Done, st.Blocked)
-	fmt.Fprintf(&b, "- next_ready: %s\n", st.NextReady)
+	fmt.Fprintf(&b, "============\n")
+	fmt.Fprintf(&b, "- Project: %s\n", st.ProjectDir)
+	fmt.Fprintf(&b, "- Plugin:  %s\n", st.PluginName)
+	fmt.Fprintf(&b, "- Daemon:  %s\n", st.Daemon)
+	fmt.Fprintf(&b, "\nQueue\n")
+	fmt.Fprintf(&b, "- Ready:       %d\n", st.QueueReady)
+	fmt.Fprintf(&b, "- In Progress: %d\n", st.InProgress)
+	fmt.Fprintf(&b, "- Done:        %d\n", st.Done)
+	fmt.Fprintf(&b, "- Blocked:     %d\n", st.Blocked)
+	fmt.Fprintf(&b, "- Next:        %s\n", st.NextReady)
 	if ralph.IsInputRequiredStatus(st) {
-		fmt.Fprintf(&b, "- input_required: true\n")
-		fmt.Fprintf(&b, "- input_hint: add issue (`./ralph new ...`) or import PRD (`./ralph import-prd --file prd.json`)\n")
+		fmt.Fprintf(&b, "\nInput Required\n")
+		fmt.Fprintf(&b, "- No queued work\n")
+		fmt.Fprintf(&b, "- Add issue: ./ralph new developer \"<title>\"\n")
+		fmt.Fprintf(&b, "- Import PRD: ./ralph import-prd --file prd.json\n")
 	}
 	if st.LastProfileReloadAt != "" || st.ProfileReloadCount > 0 {
-		fmt.Fprintf(&b, "- profile_reload_at: %s\n", valueOrDash(st.LastProfileReloadAt))
-		fmt.Fprintf(&b, "- profile_reload_count: %d\n", st.ProfileReloadCount)
+		fmt.Fprintf(&b, "\nRuntime\n")
+		fmt.Fprintf(&b, "- Profile Reload At: %s\n", valueOrDash(st.LastProfileReloadAt))
+		fmt.Fprintf(&b, "- Profile Reload #:  %d\n", st.ProfileReloadCount)
 	}
 	if st.LastFailureCause != "" || st.LastCodexRetryCount > 0 || st.LastPermissionStreak > 0 {
+		if st.LastProfileReloadAt == "" && st.ProfileReloadCount == 0 {
+			fmt.Fprintf(&b, "\nRuntime\n")
+		}
 		fmt.Fprintf(
 			&b,
-			"- last_failure: %s | codex_retries=%d | perm_streak=%d\n",
+			"- Last Failure: %s\n- Codex Retries: %d\n- Permission Streak: %d\n",
 			compactSingleLine(st.LastFailureCause, 120),
 			st.LastCodexRetryCount,
 			st.LastPermissionStreak,
