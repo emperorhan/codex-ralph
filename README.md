@@ -125,12 +125,6 @@ PRD JSON 일괄 생성:
 
 ### 1) 원격/장시간 실행
 
-기본 setup만으로 무중단 daemon 운영이 시작됩니다:
-
-```bash
-ralphctl --project-dir "$PWD" setup
-```
-
 서비스 등록(systemd/launchd):
 
 ```bash
