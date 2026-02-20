@@ -1164,8 +1164,7 @@ func startTelegramDaemon(paths ralph.Paths, runArgs []string) (string, error) {
 	cmd.Stderr = logHandle
 	cmd.Stdin = nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid:  true,
-		Setpgid: true,
+		Setsid: true,
 	}
 
 	if err := cmd.Start(); err != nil {
