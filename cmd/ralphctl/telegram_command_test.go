@@ -1074,6 +1074,51 @@ func TestTelegramPRDRefineSessionUsesCodexDynamicQuestion(t *testing.T) {
 	}
 }
 
+func TestClassifyTelegramCodexFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "network", err: fmt.Errorf("could not resolve host: api.openai.com"), want: "network"},
+		{name: "timeout", err: fmt.Errorf("codex exec timeout: context deadline exceeded"), want: "timeout"},
+		{name: "permission", err: fmt.Errorf("operation not permitted"), want: "permission"},
+		{name: "not installed", err: fmt.Errorf("codex command not found"), want: "not_installed"},
+		{name: "invalid response", err: fmt.Errorf("parse codex refine json: invalid character"), want: "invalid_response"},
+		{name: "other", err: fmt.Errorf("exit status 1"), want: "exec_failure"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, _ := classifyTelegramCodexFailure(tt.err)
+			if got != tt.want {
+				t.Fatalf("classify mismatch: got=%s want=%s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatTelegramPRDRefineUnavailableIncludesCodexReason(t *testing.T) {
+	t.Parallel()
+
+	status := telegramPRDClarityStatus{
+		Score:     42,
+		NextStage: telegramPRDStageAwaitProblem,
+		Missing:   []string{"problem statement"},
+	}
+	out := formatTelegramPRDRefineUnavailable(status, fmt.Errorf("could not resolve host: api.openai.com"))
+	if !strings.Contains(out, "codex_error: network") {
+		t.Fatalf("expected network codex_error in fallback output: %q", out)
+	}
+	if !strings.Contains(out, "codex_detail:") {
+		t.Fatalf("expected codex_detail in fallback output: %q", out)
+	}
+}
+
 func TestFormatTelegramPRDCodexScore(t *testing.T) {
 	t.Parallel()
 

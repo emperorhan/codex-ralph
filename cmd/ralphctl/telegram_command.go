@@ -1337,11 +1337,10 @@ func telegramPRDRefineSession(paths ralph.Paths, chatID int64) (string, error) {
 			return "", err
 		}
 	}
-	reply := formatTelegramPRDClarityQuestion(status)
 	if codexRefineErr != nil {
-		reply += "\n- note: codex refine unavailable, fallback heuristic used"
+		fmt.Fprintf(os.Stderr, "[telegram] prd refine codex fallback: %v\n", codexRefineErr)
 	}
-	return reply, nil
+	return formatTelegramPRDRefineUnavailable(status, codexRefineErr), nil
 }
 
 func telegramPRDScoreSession(paths ralph.Paths, chatID int64) (string, error) {
@@ -1746,11 +1745,10 @@ func advanceTelegramPRDRefineFlow(paths ralph.Paths, session telegramPRDSession)
 	if session.Stage == "" {
 		session.Stage = telegramPRDStageAwaitStoryTitle
 	}
-	reply := formatTelegramPRDClarityQuestion(status)
 	if codexRefineErr != nil {
-		reply += "\n- note: codex refine unavailable, fallback heuristic used"
+		fmt.Fprintf(os.Stderr, "[telegram] prd refine codex fallback: %v\n", codexRefineErr)
 	}
-	return session, reply, nil
+	return session, formatTelegramPRDRefineUnavailable(status, codexRefineErr), nil
 }
 
 func telegramPRDAssistInput(paths ralph.Paths, session telegramPRDSession, input string) (telegramPRDInputAssistResult, error) {
@@ -2052,7 +2050,11 @@ func refreshTelegramPRDScoreWithCodex(paths ralph.Paths, session telegramPRDSess
 func refreshTelegramPRDRefineWithCodex(paths ralph.Paths, session telegramPRDSession) (telegramPRDSession, telegramPRDCodexRefineResponse, bool, error) {
 	refine, err := telegramPRDRefineAnalyzer(paths, session)
 	if err != nil {
-		return session, telegramPRDCodexRefineResponse{}, false, err
+		score, scoreErr := analyzeTelegramPRDScoreWithCodex(paths, session)
+		if scoreErr != nil {
+			return session, telegramPRDCodexRefineResponse{}, false, fmt.Errorf("codex refine failed: %w (score fallback failed: %v)", err, scoreErr)
+		}
+		refine = buildTelegramPRDRefineFromCodexScore(session, score)
 	}
 	session.CodexScore = clampTelegramPRDScore(refine.Score)
 	session.CodexReady = refine.ReadyToApply && session.CodexScore >= telegramPRDClarityMinScore
@@ -2063,6 +2065,56 @@ func refreshTelegramPRDRefineWithCodex(paths ralph.Paths, session telegramPRDSes
 	refine.ReadyToApply = session.CodexReady
 	refine.Missing = append([]string(nil), session.CodexMissing...)
 	return session, refine, true, nil
+}
+
+func buildTelegramPRDRefineFromCodexScore(session telegramPRDSession, score telegramPRDCodexScoreResponse) telegramPRDCodexRefineResponse {
+	missing := sanitizeTelegramPRDMissingList(score.Missing)
+	ask := "현재 PRD에서 가장 불명확한 지점을 한 문장으로 구체화해 주세요."
+	if len(missing) > 0 {
+		ask = fmt.Sprintf("`%s` 항목을 실행 가능하게 한 문장으로 구체화해 주세요.", missing[0])
+	}
+	suggestedStage := guessTelegramPRDStageFromMissing(missing, session.Stage)
+	return telegramPRDCodexRefineResponse{
+		Score:          clampTelegramPRDScore(score.Score),
+		ReadyToApply:   score.ReadyToApply && score.Score >= telegramPRDClarityMinScore,
+		Ask:            ask,
+		Missing:        missing,
+		SuggestedStage: suggestedStage,
+		Reason:         compactSingleLine(strings.TrimSpace(score.Summary), 200),
+	}
+}
+
+func guessTelegramPRDStageFromMissing(missing []string, fallbackStage string) string {
+	if len(missing) == 0 {
+		if stage, ok := normalizeTelegramPRDRefineSuggestedStage(fallbackStage); ok {
+			return stage
+		}
+		return telegramPRDStageAwaitStoryTitle
+	}
+	top := strings.ToLower(strings.TrimSpace(missing[0]))
+	switch {
+	case strings.Contains(top, "product"):
+		return telegramPRDStageAwaitProduct
+	case strings.Contains(top, "problem"):
+		return telegramPRDStageAwaitProblem
+	case strings.Contains(top, "goal"):
+		return telegramPRDStageAwaitGoal
+	case strings.Contains(top, "in-scope"), strings.Contains(top, "scope"):
+		return telegramPRDStageAwaitInScope
+	case strings.Contains(top, "out-of-scope"):
+		return telegramPRDStageAwaitOutOfScope
+	case strings.Contains(top, "acceptance"):
+		return telegramPRDStageAwaitAcceptance
+	case strings.Contains(top, "constraint"):
+		return telegramPRDStageAwaitConstraints
+	case strings.Contains(top, "story"):
+		return telegramPRDStageAwaitStoryTitle
+	default:
+		if stage, ok := normalizeTelegramPRDRefineSuggestedStage(fallbackStage); ok {
+			return stage
+		}
+		return telegramPRDStageAwaitProblem
+	}
 }
 
 func analyzeTelegramPRDRefineWithCodex(paths ralph.Paths, session telegramPRDSession) (telegramPRDCodexRefineResponse, error) {
@@ -2080,23 +2132,67 @@ func analyzeTelegramPRDRefineWithCodex(paths ralph.Paths, session telegramPRDSes
 	if timeoutSec <= 0 || timeoutSec > 120 {
 		timeoutSec = telegramPRDCodexAssistTimeoutSec
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
-	defer cancel()
+	retryAttempts := profile.CodexRetryMaxAttempts
+	if retryAttempts <= 0 {
+		retryAttempts = 1
+	}
+	if retryAttempts > 5 {
+		retryAttempts = 5
+	}
+	retryBackoffSec := profile.CodexRetryBackoffSec
+	if retryBackoffSec <= 0 {
+		retryBackoffSec = 1
+	}
+	if retryBackoffSec > 3 {
+		retryBackoffSec = 3
+	}
+	conversationTail := readTelegramPRDConversationTail(paths, session.ChatID, 8000)
+	prompt := buildTelegramPRDRefinePrompt(session, conversationTail)
+	model := strings.TrimSpace(profile.CodexModelForRole("planner"))
 
-	tmpDir, err := os.MkdirTemp("", "ralph-telegram-prd-refine-*")
+	var lastErr error
+	for attempt := 1; attempt <= retryAttempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+		raw, execErr := runTelegramPRDCodexExec(ctx, paths, profile.CodexApproval, profile.CodexSandbox, model, prompt, "ralph-telegram-prd-refine-*")
+		cancel()
+		if execErr == nil {
+			parsed, parseErr := parseTelegramPRDCodexRefineResponse(raw)
+			if parseErr == nil {
+				return parsed, nil
+			}
+			lastErr = parseErr
+		} else {
+			lastErr = execErr
+		}
+		if attempt < retryAttempts {
+			time.Sleep(time.Duration(attempt*retryBackoffSec) * time.Second)
+		}
+	}
+	return telegramPRDCodexRefineResponse{}, fmt.Errorf("codex refine retries exhausted: %w", lastErr)
+}
+
+func runTelegramPRDCodexExec(
+	ctx context.Context,
+	paths ralph.Paths,
+	approval string,
+	sandbox string,
+	model string,
+	prompt string,
+	tmpPrefix string,
+) (string, error) {
+	tmpDir, err := os.MkdirTemp("", tmpPrefix)
 	if err != nil {
-		return telegramPRDCodexRefineResponse{}, err
+		return "", err
 	}
 	defer os.RemoveAll(tmpDir)
-	outPath := filepath.Join(tmpDir, "assistant-last-message.txt")
 
-	model := strings.TrimSpace(profile.CodexModelForRole("planner"))
+	outPath := filepath.Join(tmpDir, "assistant-last-message.txt")
 	args := []string{
-		"--ask-for-approval", profile.CodexApproval,
+		"--ask-for-approval", approval,
 		"exec",
-		"--sandbox", profile.CodexSandbox,
+		"--sandbox", sandbox,
 	}
-	if model != "" {
+	if strings.TrimSpace(model) != "" {
 		args = append(args, "--model", model)
 	}
 	args = append(args,
@@ -2106,20 +2202,26 @@ func analyzeTelegramPRDRefineWithCodex(paths ralph.Paths, session telegramPRDSes
 		"-",
 	)
 
-	conversationTail := readTelegramPRDConversationTail(paths, session.ChatID, 8000)
-	prompt := buildTelegramPRDRefinePrompt(session, conversationTail)
 	cmd := exec.CommandContext(ctx, "codex", args...)
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return telegramPRDCodexRefineResponse{}, err
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf("codex exec timeout: context deadline exceeded")
+		}
+		errText := compactSingleLine(strings.TrimSpace(stderr.String()), 220)
+		if errText != "" {
+			return "", fmt.Errorf("codex exec failed: %w: %s", err, errText)
+		}
+		return "", fmt.Errorf("codex exec failed: %w", err)
 	}
 	raw, err := os.ReadFile(outPath)
 	if err != nil {
-		return telegramPRDCodexRefineResponse{}, fmt.Errorf("read codex refine output: %w", err)
+		return "", fmt.Errorf("read codex output: %w", err)
 	}
-	return parseTelegramPRDCodexRefineResponse(string(raw))
+	return string(raw), nil
 }
 
 func buildTelegramPRDRefinePrompt(session telegramPRDSession, conversationTail string) string {
@@ -2553,6 +2655,56 @@ func formatTelegramPRDCodexRefineQuestion(refine telegramPRDCodexRefineResponse)
 	}
 	lines = append(lines, "- hint: 답변이 애매하면 `skip` 또는 `default` 입력")
 	return strings.Join(lines, "\n")
+}
+
+func formatTelegramPRDRefineUnavailable(status telegramPRDClarityStatus, err error) string {
+	lines := []string{
+		"prd refine question",
+		fmt.Sprintf("- score: %d/100 (gate=%d)", status.Score, telegramPRDClarityMinScore),
+		"- scoring_mode: codex_unavailable",
+		"- ask: 현재 문맥에서 가장 중요한 누락/모호 지점을 한 문장으로 구체화해 주세요.",
+	}
+	if len(status.Missing) > 0 {
+		lines = append(lines, "- missing_top: "+status.Missing[0])
+	}
+	if status.NextStage != "" {
+		lines = append(lines, "- next_stage: "+status.NextStage)
+	}
+	if err != nil {
+		lines = append(lines, "- note: codex refine unavailable")
+		category, detail := classifyTelegramCodexFailure(err)
+		if category != "" {
+			lines = append(lines, "- codex_error: "+category)
+		}
+		if detail != "" {
+			lines = append(lines, "- codex_detail: "+detail)
+		}
+	}
+	lines = append(lines, "- hint: 답변이 애매하면 `skip` 또는 `default` 입력")
+	return strings.Join(lines, "\n")
+}
+
+func classifyTelegramCodexFailure(err error) (string, string) {
+	if err == nil {
+		return "", ""
+	}
+	raw := strings.ToLower(strings.TrimSpace(err.Error()))
+	detail := compactSingleLine(strings.TrimSpace(err.Error()), 180)
+	switch {
+	case strings.Contains(raw, "not found"):
+		return "not_installed", detail
+	case strings.Contains(raw, "timeout"), strings.Contains(raw, "deadline exceeded"):
+		return "timeout", detail
+	case strings.Contains(raw, "operation not permitted"), strings.Contains(raw, "permission denied"):
+		return "permission", detail
+	case strings.Contains(raw, "could not resolve host"), strings.Contains(raw, "connection refused"),
+		strings.Contains(raw, "network"), strings.Contains(raw, "i/o timeout"), strings.Contains(raw, "temporary failure in name resolution"):
+		return "network", detail
+	case strings.Contains(raw, "json"), strings.Contains(raw, "parse"):
+		return "invalid_response", detail
+	default:
+		return "exec_failure", detail
+	}
 }
 
 func formatTelegramPRDScore(status telegramPRDClarityStatus) string {
