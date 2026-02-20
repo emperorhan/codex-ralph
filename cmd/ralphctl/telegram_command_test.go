@@ -902,100 +902,140 @@ func TestAdvanceTelegramPRDSessionQuestionInputAdvancesWithoutAssist(t *testing.
 	}
 }
 
-func TestTelegramPRDAssistInputUsesCodexRecommendForStoryTitle(t *testing.T) {
-	old := telegramPRDCodexAssistAnalyzer
-	t.Cleanup(func() { telegramPRDCodexAssistAnalyzer = old })
-	telegramPRDCodexAssistAnalyzer = func(_ ralph.Paths, _ telegramPRDSession, _ string) (telegramPRDCodexAssistResponse, error) {
-		return telegramPRDCodexAssistResponse{
-			Intent: "recommend",
-			Reply:  "story title 추천\n- 결제 실패 자동 복구",
+func TestTelegramPRDHandleInputUsesCodexTurnPatch(t *testing.T) {
+	oldTurn := telegramPRDTurnAnalyzer
+	t.Cleanup(func() { telegramPRDTurnAnalyzer = oldTurn })
+	telegramPRDTurnAnalyzer = func(_ ralph.Paths, _ telegramPRDSession, _ string) (telegramPRDCodexTurnResponse, error) {
+		return telegramPRDCodexTurnResponse{
+			Reply: "좋아요. 문제 정의를 반영했습니다.",
+			SessionPatch: telegramPRDCodexSessionPatch{
+				Problem: "국내 30-40대 개인 투자자가 비트코인 적정가치 판단 기준이 부족해 의사결정이 흔들린다.",
+			},
+			SuggestedStage: telegramPRDStageAwaitGoal,
+			NextQuestion:   "이번 사이클에서 달성할 목표를 한 문장으로 알려주세요.",
 		}, nil
 	}
 
-	session := telegramPRDSession{
-		ChatID: 1,
-		Stage:  telegramPRDStageAwaitStoryTitle,
+	controlDir := filepath.Join(t.TempDir(), "control")
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("mkdir control dir: %v", err)
 	}
-	assist, err := telegramPRDAssistInput(ralph.Paths{}, session, "추천해줘")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	paths, err := ralph.NewPaths(controlDir, projectDir)
 	if err != nil {
-		t.Fatalf("assist failed: %v", err)
+		t.Fatalf("new paths failed: %v", err)
 	}
-	if !assist.Handled {
-		t.Fatalf("recommend intent should be handled")
+
+	session := telegramPRDSession{
+		ChatID:      5001,
+		Stage:       telegramPRDStageAwaitProblem,
+		ProductName: "BTCVAL",
+		Context: telegramPRDContext{
+			AgentPriority: telegramPRDDefaultAgentPriorityMap(),
+		},
+		CreatedAtUTC:    time.Now().UTC().Format(time.RFC3339),
+		LastUpdatedAtUT: time.Now().UTC().Format(time.RFC3339),
 	}
-	if !strings.Contains(assist.Reply, "story title 추천") {
-		t.Fatalf("unexpected assist reply: %q", assist.Reply)
+	if err := telegramUpsertPRDSession(paths, session); err != nil {
+		t.Fatalf("upsert session failed: %v", err)
 	}
-	if assist.InputOverride != "" {
-		t.Fatalf("recommend intent should not override input: %q", assist.InputOverride)
+
+	reply, err := telegramPRDHandleInput(paths, 5001, "국내 30-40대 개인 투자자들이 기준 없이 매매해요")
+	if err != nil {
+		t.Fatalf("handle input failed: %v", err)
+	}
+	if !strings.Contains(reply, "문제 정의를 반영") {
+		t.Fatalf("reply should include codex response: %q", reply)
+	}
+	if !strings.Contains(reply, "next question:") {
+		t.Fatalf("reply should include next question: %q", reply)
+	}
+
+	updated, found, err := telegramLoadPRDSession(paths, 5001)
+	if err != nil {
+		t.Fatalf("load updated session failed: %v", err)
+	}
+	if !found {
+		t.Fatalf("updated session not found")
+	}
+	if updated.Stage != telegramPRDStageAwaitGoal {
+		t.Fatalf("session should move to suggested stage: %s", updated.Stage)
+	}
+	if strings.TrimSpace(updated.Context.Problem) == "" {
+		t.Fatalf("problem patch should be applied")
 	}
 }
 
-func TestTelegramPRDAssistInputUsesCodexNormalizedAnswer(t *testing.T) {
-	old := telegramPRDCodexAssistAnalyzer
-	t.Cleanup(func() { telegramPRDCodexAssistAnalyzer = old })
-	telegramPRDCodexAssistAnalyzer = func(_ ralph.Paths, _ telegramPRDSession, _ string) (telegramPRDCodexAssistResponse, error) {
-		return telegramPRDCodexAssistResponse{
-			Intent:           "answer",
-			NormalizedAnswer: "결제 실패 자동 복구",
+func TestTelegramPRDHandleInputUsesCodexTurnStoryPatch(t *testing.T) {
+	oldTurn := telegramPRDTurnAnalyzer
+	t.Cleanup(func() { telegramPRDTurnAnalyzer = oldTurn })
+	telegramPRDTurnAnalyzer = func(_ ralph.Paths, _ telegramPRDSession, _ string) (telegramPRDCodexTurnResponse, error) {
+		return telegramPRDCodexTurnResponse{
+			Reply: "",
+			Story: &telegramPRDCodexStoryPatch{
+				Title:       "비트코인 대시보드 적정가치 카드 제공",
+				Description: "실시간 시세와 온체인 지표를 결합해 적정가치 밴드를 보여준다.",
+				Role:        "developer",
+				Priority:    0,
+			},
 		}, nil
 	}
 
-	session := telegramPRDSession{
-		ChatID: 1,
-		Stage:  telegramPRDStageAwaitStoryTitle,
+	controlDir := filepath.Join(t.TempDir(), "control")
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("mkdir control dir: %v", err)
 	}
-	assist, err := telegramPRDAssistInput(ralph.Paths{}, session, "제목은 결제 실패 자동 복구")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	paths, err := ralph.NewPaths(controlDir, projectDir)
 	if err != nil {
-		t.Fatalf("assist failed: %v", err)
-	}
-	if assist.Handled {
-		t.Fatalf("answer intent should not be handled as reply")
-	}
-	if assist.InputOverride != "결제 실패 자동 복구" {
-		t.Fatalf("normalized answer should be used as override: %q", assist.InputOverride)
-	}
-}
-
-func TestTelegramPRDAssistInputFallbackReplyWhenCodexReplyEmpty(t *testing.T) {
-	old := telegramPRDCodexAssistAnalyzer
-	t.Cleanup(func() { telegramPRDCodexAssistAnalyzer = old })
-	telegramPRDCodexAssistAnalyzer = func(_ ralph.Paths, _ telegramPRDSession, _ string) (telegramPRDCodexAssistResponse, error) {
-		return telegramPRDCodexAssistResponse{
-			Intent: "clarify",
-			Reply:  "",
-		}, nil
+		t.Fatalf("new paths failed: %v", err)
 	}
 
 	session := telegramPRDSession{
-		ChatID: 1,
-		Stage:  telegramPRDStageAwaitStoryRole,
+		ChatID:      5002,
+		Stage:       telegramPRDStageAwaitStoryTitle,
+		ProductName: "BTCVAL",
+		Context: telegramPRDContext{
+			Problem:       "문제",
+			Goal:          "목표",
+			InScope:       "범위",
+			OutOfScope:    "비범위",
+			Acceptance:    "수용기준",
+			AgentPriority: telegramPRDDefaultAgentPriorityMap(),
+		},
+		CreatedAtUTC:    time.Now().UTC().Format(time.RFC3339),
+		LastUpdatedAtUT: time.Now().UTC().Format(time.RFC3339),
 	}
-	assist, err := telegramPRDAssistInput(ralph.Paths{}, session, "무슨 role?")
-	if err != nil {
-		t.Fatalf("assist failed: %v", err)
+	if err := telegramUpsertPRDSession(paths, session); err != nil {
+		t.Fatalf("upsert session failed: %v", err)
 	}
-	if !assist.Handled {
-		t.Fatalf("clarify intent should be handled")
-	}
-	if !strings.Contains(assist.Reply, "manager|planner|developer|qa") {
-		t.Fatalf("fallback guide should include role options: %q", assist.Reply)
-	}
-}
 
-func TestParseTelegramPRDCodexAssistResponse(t *testing.T) {
-	t.Parallel()
-
-	raw := "```json\n{\"intent\":\"recommend\",\"reply\":\"추천 1\\n추천 2\",\"normalized_answer\":\"\"}\n```"
-	got, err := parseTelegramPRDCodexAssistResponse(raw)
+	reply, err := telegramPRDHandleInput(paths, 5002, "스토리 하나 만들어줘")
 	if err != nil {
-		t.Fatalf("parse failed: %v", err)
+		t.Fatalf("handle input failed: %v", err)
 	}
-	if got.Intent != "recommend" {
-		t.Fatalf("intent mismatch: got=%q want=%q", got.Intent, "recommend")
+	if !strings.Contains(reply, "story added") {
+		t.Fatalf("story add reply expected: %q", reply)
 	}
-	if !strings.Contains(got.Reply, "추천 1") {
-		t.Fatalf("reply mismatch: %q", got.Reply)
+
+	updated, found, err := telegramLoadPRDSession(paths, 5002)
+	if err != nil {
+		t.Fatalf("load updated session failed: %v", err)
+	}
+	if !found {
+		t.Fatalf("updated session not found")
+	}
+	if len(updated.Stories) != 1 {
+		t.Fatalf("story should be appended by codex turn: %d", len(updated.Stories))
+	}
+	if updated.Stories[0].Role != "developer" {
+		t.Fatalf("story role mismatch: %s", updated.Stories[0].Role)
 	}
 }
 
@@ -1481,7 +1521,7 @@ func TestTelegramPRDSessionLockRecoveryFromStaleInvalidOwner(t *testing.T) {
 	}
 }
 
-func TestBuildTelegramPRDAssistPromptIncludesConversation(t *testing.T) {
+func TestBuildTelegramPRDTurnPromptIncludesConversation(t *testing.T) {
 	t.Parallel()
 
 	session := telegramPRDSession{
@@ -1489,14 +1529,14 @@ func TestBuildTelegramPRDAssistPromptIncludesConversation(t *testing.T) {
 		Stage:       telegramPRDStageAwaitProblem,
 		ProductName: "Ralph",
 	}
-	prompt := buildTelegramPRDAssistPrompt(session, "문제는 멈춤", "### 2026-02-20T00:00:00Z | user\n이전 입력")
+	prompt := buildTelegramPRDTurnPrompt(session, "문제는 멈춤", "### 2026-02-20T00:00:00Z | user\n이전 입력")
 	if !strings.Contains(prompt, "Recent conversation (markdown):") {
-		t.Fatalf("assist prompt should include conversation section: %q", prompt)
+		t.Fatalf("turn prompt should include conversation section: %q", prompt)
 	}
 	if !strings.Contains(prompt, "이전 입력") {
-		t.Fatalf("assist prompt should include conversation content: %q", prompt)
+		t.Fatalf("turn prompt should include conversation content: %q", prompt)
 	}
-	if !strings.Contains(prompt, "Expected answer format:") {
-		t.Fatalf("assist prompt should include expected answer format: %q", prompt)
+	if !strings.Contains(prompt, "Schema:") {
+		t.Fatalf("turn prompt should include schema: %q", prompt)
 	}
 }
