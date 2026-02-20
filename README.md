@@ -1,6 +1,10 @@
-# codex-ralph
+<p align="center">
+  <img src="assets/ralph-hero.jpg" alt="Ralph hero" width="180" />
+</p>
 
-`codex-ralph`는 프로젝트 안에서 `manager / planner / developer / qa` 자율 에이전트 루프를 운영하는 CLI입니다.
+<h1 align="center">codex-ralph</h1>
+
+<p align="center"><strong>manager / planner / developer / qa</strong> 자율 에이전트 루프 CLI</p>
 
 ## 세팅
 
@@ -152,6 +156,41 @@ ralphctl fleet stop --all
 ### 3) Telegram 채널 (선택)
 
 텔레그램은 필수 설정이 아닙니다.
+
+필요한 값:
+
+- `bot token`
+- `chat-ids`
+- `user-ids` (특히 그룹 제어 시 권장/필수)
+
+값 수집 방법 (웹):
+
+1. `@BotFather`에서 봇 생성 후 토큰 발급 (`/newbot`).
+2. 봇을 사용할 대화방에 추가하고 메시지 1개 전송.
+3. 브라우저에서 아래 URL 열기:
+
+```bash
+https://api.telegram.org/bot<bot-token>/getUpdates
+```
+
+JSON에서 다음 값을 복사:
+
+- `message.chat.id` -> `chat-ids`
+- `message.from.id` -> `user-ids`
+- 그룹/슈퍼그룹 `chat.id`는 음수(보통 `-100...`)
+- 결과가 비어 있으면 봇/그룹에 메시지를 한 번 더 보내고 새로고침
+
+원격 머신 세팅 시에는 로컬 브라우저에서 값을 확인한 뒤, 서버에서 아래처럼 입력하면 됩니다:
+
+```bash
+ralphctl --project-dir "$PWD" telegram setup --non-interactive \
+  --token "<bot-token>" \
+  --chat-ids "<chat-id>" \
+  --user-ids "<user-id>" \
+  --allow-control=false \
+  --notify=true \
+  --notify-scope auto
+```
 
 권장:
 
