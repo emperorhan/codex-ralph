@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -430,8 +431,70 @@ func appendSecurityChecks(report *DoctorReport, paths Paths, profile Profile) {
 	checkFileWritePermissions(report, "security:file-perm:profile.local.yaml", paths.ProfileLocalYAMLFile)
 	checkFileWritePermissions(report, "security:file-perm:profile.env", paths.ProfileFile)
 	checkFileWritePermissions(report, "security:file-perm:profile.local.env", paths.ProfileLocalFile)
+	checkFileWritePermissions(report, "security:file-perm:telegram.env", filepath.Join(paths.ControlDir, "telegram.env"))
+	checkTelegramControlAuth(report, paths.ControlDir)
 	checkDirectoryWritable(report, "security:write-check:project-dir", paths.ProjectDir)
 	checkDirectoryWritable(report, "security:write-check:control-dir", paths.ControlDir)
+}
+
+func checkTelegramControlAuth(report *DoctorReport, controlDir string) {
+	configPath := filepath.Join(controlDir, "telegram.env")
+	values, err := ReadEnvFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			report.add("security:telegram-control-auth", doctorStatusPass, "telegram not configured")
+			return
+		}
+		report.add("security:telegram-control-auth", doctorStatusFail, fmt.Sprintf("read telegram config failed: %v", err))
+		return
+	}
+
+	allowControl := false
+	if raw := strings.TrimSpace(values["RALPH_TELEGRAM_ALLOW_CONTROL"]); raw != "" {
+		allowControl = strings.EqualFold(raw, "1") || strings.EqualFold(raw, "true") || strings.EqualFold(raw, "yes") || strings.EqualFold(raw, "y") || strings.EqualFold(raw, "on")
+	}
+	if !allowControl {
+		report.add("security:telegram-control-auth", doctorStatusPass, "control commands disabled")
+		return
+	}
+
+	chatIDs, err := ParseTelegramChatIDs(values["RALPH_TELEGRAM_CHAT_IDS"])
+	if err != nil {
+		report.add("security:telegram-control-auth", doctorStatusFail, fmt.Sprintf("invalid chat ids: %v", err))
+		return
+	}
+	if len(chatIDs) == 0 {
+		report.add("security:telegram-control-auth", doctorStatusFail, "allow-control enabled but chat ids are empty")
+		return
+	}
+
+	userIDs := map[int64]struct{}{}
+	userIDsRaw := strings.TrimSpace(values["RALPH_TELEGRAM_USER_IDS"])
+	if userIDsRaw != "" {
+		userIDs, err = ParseTelegramUserIDs(userIDsRaw)
+		if err != nil {
+			report.add("security:telegram-control-auth", doctorStatusFail, fmt.Sprintf("invalid user ids: %v", err))
+			return
+		}
+	}
+
+	needsUserAllowlist := false
+	for chatID := range chatIDs {
+		if chatID < 0 {
+			needsUserAllowlist = true
+			break
+		}
+	}
+	if needsUserAllowlist && len(userIDs) == 0 {
+		report.add("security:telegram-control-auth", doctorStatusFail, "allow-control with group/supergroup chat requires RALPH_TELEGRAM_USER_IDS")
+		return
+	}
+
+	if len(userIDs) == 0 {
+		report.add("security:telegram-control-auth", doctorStatusWarn, "control enabled without user allowlist (safe for private chat, risky if chat type changes)")
+		return
+	}
+	report.add("security:telegram-control-auth", doctorStatusPass, "control auth is scoped by chat and user allowlists")
 }
 
 func checkFileWritePermissions(report *DoctorReport, checkName, path string) {

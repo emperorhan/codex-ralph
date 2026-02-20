@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -56,6 +57,92 @@ func TestEnvIntDefault(t *testing.T) {
 	}
 }
 
+func TestParseTelegramTargetSpec(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		in        string
+		wantAll   bool
+		wantID    string
+		wantError bool
+	}{
+		{name: "empty", in: "", wantAll: false, wantID: ""},
+		{name: "all", in: "all", wantAll: true, wantID: ""},
+		{name: "star", in: "*", wantAll: true, wantID: ""},
+		{name: "id", in: "wallet", wantAll: false, wantID: "wallet"},
+		{name: "invalid multi", in: "all wallet", wantError: true},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			spec, err := parseTelegramTargetSpec(tt.in)
+			if tt.wantError {
+				if err == nil {
+					t.Fatalf("expected error for %q", tt.in)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if spec.All != tt.wantAll || spec.ProjectID != tt.wantID {
+				t.Fatalf("parseTelegramTargetSpec(%q)=(all=%t,id=%q) want=(all=%t,id=%q)", tt.in, spec.All, spec.ProjectID, tt.wantAll, tt.wantID)
+			}
+		})
+	}
+}
+
+func TestNormalizeNotifyScope(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{in: "", want: "auto"},
+		{in: "auto", want: "auto"},
+		{in: "project", want: "project"},
+		{in: "fleet", want: "fleet"},
+		{in: "invalid", wantErr: true},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := normalizeNotifyScope(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("normalizeNotifyScope(%q)=%q want=%q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRequiresUserAllowlistForControl(t *testing.T) {
+	t.Parallel()
+
+	if requiresUserAllowlistForControl(map[int64]struct{}{12345: {}}) {
+		t.Fatalf("private chat should not require user allowlist")
+	}
+	if !requiresUserAllowlistForControl(map[int64]struct{}{-10012345: {}}) {
+		t.Fatalf("group chat should require user allowlist")
+	}
+	if !requiresUserAllowlistForControl(map[int64]struct{}{12345: {}, -200: {}}) {
+		t.Fatalf("mixed chats should require user allowlist")
+	}
+}
+
 func TestTelegramConfigFileFromArgs(t *testing.T) {
 	t.Parallel()
 
@@ -78,8 +165,10 @@ func TestSaveLoadTelegramCLIConfig(t *testing.T) {
 	want := telegramCLIConfig{
 		Token:                     "123456:ABC-DEF",
 		ChatIDs:                   "1001,1002",
+		UserIDs:                   "2001,2002",
 		AllowControl:              true,
 		Notify:                    true,
+		NotifyScope:               "fleet",
 		NotifyIntervalSec:         45,
 		NotifyRetryThreshold:      3,
 		NotifyPermStreakThreshold: 5,
@@ -98,11 +187,17 @@ func TestSaveLoadTelegramCLIConfig(t *testing.T) {
 	if got.ChatIDs != want.ChatIDs {
 		t.Fatalf("chat ids mismatch: got=%q want=%q", got.ChatIDs, want.ChatIDs)
 	}
+	if got.UserIDs != want.UserIDs {
+		t.Fatalf("user ids mismatch: got=%q want=%q", got.UserIDs, want.UserIDs)
+	}
 	if got.AllowControl != want.AllowControl {
 		t.Fatalf("allow control mismatch: got=%t want=%t", got.AllowControl, want.AllowControl)
 	}
 	if got.Notify != want.Notify {
 		t.Fatalf("notify mismatch: got=%t want=%t", got.Notify, want.Notify)
+	}
+	if got.NotifyScope != want.NotifyScope {
+		t.Fatalf("notify scope mismatch: got=%q want=%q", got.NotifyScope, want.NotifyScope)
 	}
 	if got.NotifyIntervalSec != want.NotifyIntervalSec {
 		t.Fatalf("notify interval mismatch: got=%d want=%d", got.NotifyIntervalSec, want.NotifyIntervalSec)
@@ -112,6 +207,14 @@ func TestSaveLoadTelegramCLIConfig(t *testing.T) {
 	}
 	if got.NotifyPermStreakThreshold != want.NotifyPermStreakThreshold {
 		t.Fatalf("notify perm mismatch: got=%d want=%d", got.NotifyPermStreakThreshold, want.NotifyPermStreakThreshold)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat telegram config failed: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("telegram config mode mismatch: got=%#o want=%#o", info.Mode().Perm(), 0o600)
 	}
 }
 

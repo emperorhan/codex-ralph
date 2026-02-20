@@ -74,13 +74,13 @@ git push origin v0.1.0
 
 선택 사항: `COSIGN_PRIVATE_KEY`, `COSIGN_PASSWORD` 시크릿을 설정하면 `checksums.txt.sig`, `cosign.pub`도 함께 배포됩니다.
 
-### 3) Control Dir 기본값
+### 2) Control Dir 기본값
 
 - 기본 control dir: `~/.ralph-control`
 - 첫 실행 시 기본 plugin/registry가 자동으로 준비됩니다.
 - 다른 경로를 쓰고 싶으면 `--control-dir <DIR>`로 override 하세요.
 
-### 4) 프로젝트 연결 (권장: setup)
+### 3) 프로젝트 연결 (권장: setup)
 
 ```bash
 ralphctl --project-dir "$PWD" setup
@@ -118,7 +118,7 @@ ralphctl --project-dir "$PWD" setup --non-interactive
 - busy-wait 시 자동 doctor 복구 여부
 - validation 모드(plugin default/skip/custom)
 
-### 5) 플러그인 선택 가이드
+### 4) 플러그인 선택 가이드
 
 - `universal-default`: 언어/프레임워크 무관 기본값 (권장 시작점)
 - `go-default`: Go 프로젝트 기본 검증 커맨드 포함
@@ -130,7 +130,7 @@ ralphctl --project-dir "$PWD" setup --non-interactive
 ralphctl --project-dir "$PWD" install --plugin universal-default
 ```
 
-### 6) 세팅 점검
+### 5) 세팅 점검
 
 ```bash
 cd <project-dir>
@@ -367,8 +367,10 @@ ralphctl --project-dir "$PWD" telegram run
 ralphctl --project-dir "$PWD" telegram setup --non-interactive \
   --token "<bot-token>" \
   --chat-ids "<allowed-chat-id-1>,<allowed-chat-id-2>" \
+  --user-ids "<allowed-user-id-1>,<allowed-user-id-2>" \
   --allow-control=false \
-  --notify=true
+  --notify=true \
+  --notify-scope auto
 ```
 
 `telegram setup`은 기본적으로 `<control-dir>/telegram.env`에 저장됩니다. `run`은 같은 파일을 자동으로 읽고, 환경변수/flag로 override할 수 있습니다.
@@ -381,6 +383,12 @@ ralphctl --project-dir "$PWD" telegram run --notify=false
 
 # 제어 명령 허용(/start, /stop, /restart, /doctor_repair, /recover)
 ralphctl --project-dir "$PWD" telegram run --allow-control
+
+# 알림 범위(project|fleet|auto)
+ralphctl --project-dir "$PWD" telegram run --notify-scope fleet
+
+# 그룹 채팅 보안 강화(권장): user allowlist
+ralphctl --project-dir "$PWD" telegram run --user-ids "123456789,987654321"
 ```
 
 기본 알림(`--notify=true`):
@@ -402,8 +410,16 @@ ralphctl --project-dir "$PWD" telegram run \
 지원 명령:
 
 - `/help`, `/ping`
-- `/status`, `/doctor`, `/fleet`
-- (`--allow-control`일 때) `/start`, `/stop`, `/restart`, `/doctor_repair`, `/recover`
+- `/status [all|<project_id>]`, `/doctor [all|<project_id>]`, `/fleet [all|<project_id>]`
+- (`--allow-control`일 때) `/start [all|<project_id>]`, `/stop [all|<project_id>]`, `/restart [all|<project_id>]`, `/doctor_repair [all|<project_id>]`, `/recover [all|<project_id>]`
+
+오케스트레이션 메모:
+
+- 인자를 생략하면 현재 `--project-dir` 프로젝트에 적용됩니다.
+- `all` 또는 `<project_id>`를 넘기면 fleet 기준으로 전체/특정 프로젝트를 대상으로 동작합니다.
+- `notify-scope=auto`는 fleet 프로젝트가 등록되어 있으면 전체 프로젝트 알림, 없으면 현재 프로젝트 알림으로 동작합니다.
+- `user-ids`를 설정하면 허용 chat 안에서도 지정된 사용자만 명령을 실행할 수 있습니다.
+- 보안 강제: `allow-control=true`이고 그룹/슈퍼그룹 chat id(음수)를 쓰는 경우 `user-ids`가 반드시 필요합니다.
 
 ### 9) Plugin Registry(무결성)
 

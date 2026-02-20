@@ -21,7 +21,7 @@ import (
 func runTelegramCommand(controlDir string, paths ralph.Paths, args []string) error {
 	usage := func() {
 		fmt.Fprintln(os.Stderr, "Usage: ralphctl --control-dir DIR --project-dir DIR telegram <run|setup> [flags]")
-		fmt.Fprintln(os.Stderr, "Env: RALPH_TELEGRAM_BOT_TOKEN, RALPH_TELEGRAM_CHAT_IDS, RALPH_TELEGRAM_ALLOW_CONTROL, RALPH_TELEGRAM_NOTIFY")
+		fmt.Fprintln(os.Stderr, "Env: RALPH_TELEGRAM_BOT_TOKEN, RALPH_TELEGRAM_CHAT_IDS, RALPH_TELEGRAM_USER_IDS, RALPH_TELEGRAM_ALLOW_CONTROL, RALPH_TELEGRAM_NOTIFY, RALPH_TELEGRAM_NOTIFY_SCOPE")
 	}
 	if len(args) == 0 {
 		usage()
@@ -50,8 +50,10 @@ func runTelegramRunCommand(controlDir string, paths ralph.Paths, args []string) 
 	configFileFlag := fs.String("config-file", configFile, "telegram config file path")
 	token := fs.String("token", firstNonEmpty(strings.TrimSpace(os.Getenv("RALPH_TELEGRAM_BOT_TOKEN")), cfg.Token), "telegram bot token")
 	chatIDsRaw := fs.String("chat-ids", firstNonEmpty(strings.TrimSpace(os.Getenv("RALPH_TELEGRAM_CHAT_IDS")), cfg.ChatIDs), "allowed chat IDs CSV (required)")
+	userIDsRaw := fs.String("user-ids", firstNonEmpty(strings.TrimSpace(os.Getenv("RALPH_TELEGRAM_USER_IDS")), cfg.UserIDs), "allowed user IDs CSV (optional; recommended for group chats)")
 	allowControl := fs.Bool("allow-control", envBoolDefault("RALPH_TELEGRAM_ALLOW_CONTROL", cfg.AllowControl), "allow control commands (/start,/stop,/restart,/doctor_repair,/recover)")
 	enableNotify := fs.Bool("notify", envBoolDefault("RALPH_TELEGRAM_NOTIFY", cfg.Notify), "push alerts for blocked/retry/stuck")
+	notifyScope := fs.String("notify-scope", firstNonEmpty(strings.TrimSpace(os.Getenv("RALPH_TELEGRAM_NOTIFY_SCOPE")), cfg.NotifyScope), "notify scope: project|fleet|auto")
 	notifyIntervalSec := fs.Int("notify-interval-sec", envIntDefault("RALPH_TELEGRAM_NOTIFY_INTERVAL_SEC", cfg.NotifyIntervalSec), "status poll interval for notify alerts")
 	notifyRetryThreshold := fs.Int("notify-retry-threshold", envIntDefault("RALPH_TELEGRAM_NOTIFY_RETRY_THRESHOLD", cfg.NotifyRetryThreshold), "codex retry alert threshold")
 	notifyPermStreakThreshold := fs.Int("notify-perm-streak-threshold", envIntDefault("RALPH_TELEGRAM_NOTIFY_PERM_STREAK_THRESHOLD", cfg.NotifyPermStreakThreshold), "permission streak alert threshold")
@@ -72,11 +74,25 @@ func runTelegramRunCommand(controlDir string, paths ralph.Paths, args []string) 
 	if len(allowedChatIDs) == 0 {
 		return fmt.Errorf("--chat-ids is required (or run `ralphctl telegram setup`)")
 	}
+	allowedUserIDs := map[int64]struct{}{}
+	if strings.TrimSpace(*userIDsRaw) != "" {
+		allowedUserIDs, err = ralph.ParseTelegramUserIDs(*userIDsRaw)
+		if err != nil {
+			return err
+		}
+	}
+	if *allowControl && len(allowedUserIDs) == 0 && requiresUserAllowlistForControl(allowedChatIDs) {
+		return fmt.Errorf("--allow-control with group/supergroup chat requires --user-ids (or set RALPH_TELEGRAM_USER_IDS)")
+	}
 	if *pollTimeoutSec <= 0 {
 		return fmt.Errorf("--poll-timeout-sec must be > 0")
 	}
 	if *notifyIntervalSec <= 0 {
 		return fmt.Errorf("--notify-interval-sec must be > 0")
+	}
+	resolvedNotifyScope, err := normalizeNotifyScope(*notifyScope)
+	if err != nil {
+		return fmt.Errorf("invalid --notify-scope: %w", err)
 	}
 
 	fmt.Println("telegram bot started")
@@ -85,15 +101,21 @@ func runTelegramRunCommand(controlDir string, paths ralph.Paths, args []string) 
 	fmt.Printf("- config_file: %s\n", configFile)
 	fmt.Printf("- allow_control: %t\n", *allowControl)
 	fmt.Printf("- notify: %t\n", *enableNotify)
+	fmt.Printf("- notify_scope: %s\n", resolvedNotifyScope)
 	fmt.Printf("- notify_interval_sec: %d\n", *notifyIntervalSec)
 	fmt.Printf("- notify_retry_threshold: %d\n", *notifyRetryThreshold)
 	fmt.Printf("- notify_perm_streak_threshold: %d\n", *notifyPermStreakThreshold)
 	fmt.Printf("- allowed_chats: %d\n", len(allowedChatIDs))
+	if len(allowedUserIDs) > 0 {
+		fmt.Printf("- allowed_users: %d\n", len(allowedUserIDs))
+	} else {
+		fmt.Printf("- allowed_users: any (chat allowlist only)\n")
+	}
 	fmt.Printf("- offset_file: %s\n", *offsetFile)
 
 	notifyHandler := ralph.TelegramNotifyHandler(nil)
 	if *enableNotify {
-		notifyHandler = newStatusNotifyHandler(paths, *notifyRetryThreshold, *notifyPermStreakThreshold)
+		notifyHandler = newScopedStatusNotifyHandler(controlDir, paths, resolvedNotifyScope, *notifyRetryThreshold, *notifyPermStreakThreshold)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -101,6 +123,7 @@ func runTelegramRunCommand(controlDir string, paths ralph.Paths, args []string) 
 	return ralph.RunTelegramBot(ctx, ralph.TelegramBotOptions{
 		Token:             *token,
 		AllowedChatIDs:    allowedChatIDs,
+		AllowedUserIDs:    allowedUserIDs,
 		PollTimeoutSec:    *pollTimeoutSec,
 		NotifyIntervalSec: *notifyIntervalSec,
 		OffsetFile:        *offsetFile,
@@ -119,8 +142,13 @@ func runTelegramSetupCommand(controlDir string, args []string) error {
 
 	defaultToken := firstNonEmpty(strings.TrimSpace(os.Getenv("RALPH_TELEGRAM_BOT_TOKEN")), cfg.Token)
 	defaultChatIDs := firstNonEmpty(strings.TrimSpace(os.Getenv("RALPH_TELEGRAM_CHAT_IDS")), cfg.ChatIDs)
+	defaultUserIDs := firstNonEmpty(strings.TrimSpace(os.Getenv("RALPH_TELEGRAM_USER_IDS")), cfg.UserIDs)
 	defaultAllowControl := envBoolDefault("RALPH_TELEGRAM_ALLOW_CONTROL", cfg.AllowControl)
 	defaultNotify := envBoolDefault("RALPH_TELEGRAM_NOTIFY", cfg.Notify)
+	defaultNotifyScope := firstNonEmpty(strings.TrimSpace(os.Getenv("RALPH_TELEGRAM_NOTIFY_SCOPE")), cfg.NotifyScope)
+	if strings.TrimSpace(defaultNotifyScope) == "" {
+		defaultNotifyScope = "auto"
+	}
 	defaultNotifyInterval := envIntDefault("RALPH_TELEGRAM_NOTIFY_INTERVAL_SEC", cfg.NotifyIntervalSec)
 	defaultNotifyRetry := envIntDefault("RALPH_TELEGRAM_NOTIFY_RETRY_THRESHOLD", cfg.NotifyRetryThreshold)
 	defaultNotifyPerm := envIntDefault("RALPH_TELEGRAM_NOTIFY_PERM_STREAK_THRESHOLD", cfg.NotifyPermStreakThreshold)
@@ -130,8 +158,10 @@ func runTelegramSetupCommand(controlDir string, args []string) error {
 	nonInteractive := fs.Bool("non-interactive", false, "save config without interactive prompts")
 	tokenFlag := fs.String("token", defaultToken, "telegram bot token")
 	chatIDsFlag := fs.String("chat-ids", defaultChatIDs, "allowed chat IDs CSV")
+	userIDsFlag := fs.String("user-ids", defaultUserIDs, "allowed user IDs CSV (optional)")
 	allowControlFlag := fs.Bool("allow-control", defaultAllowControl, "allow control commands")
 	notifyFlag := fs.Bool("notify", defaultNotify, "enable notify alerts")
+	notifyScopeFlag := fs.String("notify-scope", defaultNotifyScope, "notify scope: project|fleet|auto")
 	notifyIntervalFlag := fs.Int("notify-interval-sec", defaultNotifyInterval, "notify interval seconds")
 	notifyRetryFlag := fs.Int("notify-retry-threshold", defaultNotifyRetry, "notify retry threshold")
 	notifyPermFlag := fs.Int("notify-perm-streak-threshold", defaultNotifyPerm, "notify permission streak threshold")
@@ -142,8 +172,10 @@ func runTelegramSetupCommand(controlDir string, args []string) error {
 	final := telegramCLIConfig{
 		Token:                     strings.TrimSpace(*tokenFlag),
 		ChatIDs:                   strings.TrimSpace(*chatIDsFlag),
+		UserIDs:                   strings.TrimSpace(*userIDsFlag),
 		AllowControl:              *allowControlFlag,
 		Notify:                    *notifyFlag,
+		NotifyScope:               strings.TrimSpace(*notifyScopeFlag),
 		NotifyIntervalSec:         *notifyIntervalFlag,
 		NotifyRetryThreshold:      *notifyRetryFlag,
 		NotifyPermStreakThreshold: *notifyPermFlag,
@@ -168,6 +200,12 @@ func runTelegramSetupCommand(controlDir string, args []string) error {
 		}
 		final.ChatIDs = strings.TrimSpace(chatInput)
 
+		userInput, err := promptFleetInput(reader, "Allowed user IDs (CSV, optional)", final.UserIDs)
+		if err != nil {
+			return err
+		}
+		final.UserIDs = strings.TrimSpace(userInput)
+
 		allowControlInput, err := promptFleetBool(reader, "Allow control commands?", final.AllowControl)
 		if err != nil {
 			return err
@@ -179,6 +217,12 @@ func runTelegramSetupCommand(controlDir string, args []string) error {
 			return err
 		}
 		final.Notify = notifyInput
+
+		scopeInput, err := promptFleetChoice(reader, "Notify scope", []string{"auto", "project", "fleet"}, firstNonEmpty(final.NotifyScope, "auto"))
+		if err != nil {
+			return err
+		}
+		final.NotifyScope = strings.TrimSpace(scopeInput)
 
 		intervalInput, err := promptFleetInput(reader, "Notify interval sec", strconv.Itoa(final.NotifyIntervalSec))
 		if err != nil {
@@ -211,12 +255,28 @@ func runTelegramSetupCommand(controlDir string, args []string) error {
 	if strings.TrimSpace(final.ChatIDs) == "" {
 		return fmt.Errorf("chat-ids is required")
 	}
-	if _, err := ralph.ParseTelegramChatIDs(final.ChatIDs); err != nil {
+	allowedChatIDs, err := ralph.ParseTelegramChatIDs(final.ChatIDs)
+	if err != nil {
 		return err
+	}
+	allowedUserIDs := map[int64]struct{}{}
+	if strings.TrimSpace(final.UserIDs) != "" {
+		allowedUserIDs, err = ralph.ParseTelegramUserIDs(final.UserIDs)
+		if err != nil {
+			return err
+		}
+	}
+	if final.AllowControl && len(allowedUserIDs) == 0 && requiresUserAllowlistForControl(allowedChatIDs) {
+		return fmt.Errorf("allow-control with group/supergroup chat requires user-ids")
 	}
 	if final.NotifyIntervalSec <= 0 {
 		return fmt.Errorf("notify-interval-sec must be > 0")
 	}
+	scope, err := normalizeNotifyScope(final.NotifyScope)
+	if err != nil {
+		return fmt.Errorf("notify-scope: %w", err)
+	}
+	final.NotifyScope = scope
 	if err := saveTelegramCLIConfig(configFile, final); err != nil {
 		return err
 	}
@@ -225,6 +285,7 @@ func runTelegramSetupCommand(controlDir string, args []string) error {
 	fmt.Printf("- config_file: %s\n", configFile)
 	fmt.Printf("- allow_control: %t\n", final.AllowControl)
 	fmt.Printf("- notify: %t\n", final.Notify)
+	fmt.Printf("- notify_scope: %s\n", final.NotifyScope)
 	fmt.Printf("- run: ralphctl --project-dir \"$PWD\" telegram run --config-file %s\n", configFile)
 	return nil
 }
@@ -232,8 +293,10 @@ func runTelegramSetupCommand(controlDir string, args []string) error {
 type telegramCLIConfig struct {
 	Token                     string
 	ChatIDs                   string
+	UserIDs                   string
 	AllowControl              bool
 	Notify                    bool
+	NotifyScope               string
 	NotifyIntervalSec         int
 	NotifyRetryThreshold      int
 	NotifyPermStreakThreshold int
@@ -243,6 +306,7 @@ func defaultTelegramCLIConfig() telegramCLIConfig {
 	return telegramCLIConfig{
 		AllowControl:              false,
 		Notify:                    true,
+		NotifyScope:               "auto",
 		NotifyIntervalSec:         30,
 		NotifyRetryThreshold:      2,
 		NotifyPermStreakThreshold: 3,
@@ -289,11 +353,17 @@ func loadTelegramCLIConfig(path string) (telegramCLIConfig, error) {
 	if v := strings.TrimSpace(values["RALPH_TELEGRAM_CHAT_IDS"]); v != "" {
 		cfg.ChatIDs = v
 	}
+	if v := strings.TrimSpace(values["RALPH_TELEGRAM_USER_IDS"]); v != "" {
+		cfg.UserIDs = v
+	}
 	if v, ok := parseBoolRaw(values["RALPH_TELEGRAM_ALLOW_CONTROL"]); ok {
 		cfg.AllowControl = v
 	}
 	if v, ok := parseBoolRaw(values["RALPH_TELEGRAM_NOTIFY"]); ok {
 		cfg.Notify = v
+	}
+	if v := strings.TrimSpace(values["RALPH_TELEGRAM_NOTIFY_SCOPE"]); v != "" {
+		cfg.NotifyScope = v
 	}
 	if v, ok := parseIntRaw(values["RALPH_TELEGRAM_NOTIFY_INTERVAL_SEC"]); ok {
 		cfg.NotifyIntervalSec = v
@@ -319,12 +389,20 @@ func saveTelegramCLIConfig(path string, cfg telegramCLIConfig) error {
 	b.WriteString("# Ralph Telegram config\n")
 	b.WriteString("RALPH_TELEGRAM_BOT_TOKEN=" + envQuoteValue(cfg.Token) + "\n")
 	b.WriteString("RALPH_TELEGRAM_CHAT_IDS=" + envQuoteValue(cfg.ChatIDs) + "\n")
+	b.WriteString("RALPH_TELEGRAM_USER_IDS=" + envQuoteValue(cfg.UserIDs) + "\n")
 	b.WriteString("RALPH_TELEGRAM_ALLOW_CONTROL=" + strconv.FormatBool(cfg.AllowControl) + "\n")
 	b.WriteString("RALPH_TELEGRAM_NOTIFY=" + strconv.FormatBool(cfg.Notify) + "\n")
+	b.WriteString("RALPH_TELEGRAM_NOTIFY_SCOPE=" + cfg.NotifyScope + "\n")
 	b.WriteString("RALPH_TELEGRAM_NOTIFY_INTERVAL_SEC=" + strconv.Itoa(cfg.NotifyIntervalSec) + "\n")
 	b.WriteString("RALPH_TELEGRAM_NOTIFY_RETRY_THRESHOLD=" + strconv.Itoa(cfg.NotifyRetryThreshold) + "\n")
 	b.WriteString("RALPH_TELEGRAM_NOTIFY_PERM_STREAK_THRESHOLD=" + strconv.Itoa(cfg.NotifyPermStreakThreshold) + "\n")
-	return os.WriteFile(path, []byte(b.String()), 0o600)
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("set telegram config permissions: %w", err)
+	}
+	return nil
 }
 
 func telegramCommandHandler(controlDir string, paths ralph.Paths, allowControl bool) ralph.TelegramCommandHandler {
@@ -332,7 +410,7 @@ func telegramCommandHandler(controlDir string, paths ralph.Paths, allowControl b
 		_ = ctx
 		_ = chatID
 
-		cmd, _ := parseTelegramCommandLine(text)
+		cmd, cmdArgs := parseTelegramCommandLine(text)
 		switch cmd {
 		case "", "/help":
 			return buildTelegramHelp(allowControl), nil
@@ -341,86 +419,314 @@ func telegramCommandHandler(controlDir string, paths ralph.Paths, allowControl b
 			return "pong " + time.Now().UTC().Format(time.RFC3339), nil
 
 		case "/status":
-			st, err := ralph.GetStatus(paths)
-			if err != nil {
-				return "", err
-			}
-			return formatStatusForTelegram(st), nil
+			return telegramStatusCommand(controlDir, paths, cmdArgs)
 
 		case "/fleet", "/fleet_status", "/dashboard":
-			var b bytes.Buffer
-			if err := renderFleetDashboard(controlDir, "", true, &b); err != nil {
-				return "", err
-			}
-			return b.String(), nil
+			return telegramFleetDashboardCommand(controlDir, cmdArgs)
 
 		case "/doctor":
-			report, err := ralph.RunDoctor(paths)
-			if err != nil {
-				return "", err
-			}
-			return formatDoctorReportForTelegram(report), nil
+			return telegramDoctorCommand(controlDir, paths, cmdArgs)
 
 		case "/start":
 			if !allowControl {
 				return "control commands are disabled (run with --allow-control)", nil
 			}
-			res, err := startProjectDaemon(paths, startOptions{
-				DoctorRepair: true,
-				FixPerms:     false,
-				Out:          io.Discard,
-			})
-			if err != nil {
-				return "", err
-			}
-			return res, nil
+			return telegramStartCommand(controlDir, paths, cmdArgs)
 
 		case "/stop":
 			if !allowControl {
 				return "control commands are disabled (run with --allow-control)", nil
 			}
-			if err := ralph.StopDaemon(paths); err != nil {
-				return "", err
-			}
-			return "ralph-loop stopped", nil
+			return telegramStopCommand(controlDir, paths, cmdArgs)
 
 		case "/restart":
 			if !allowControl {
 				return "control commands are disabled (run with --allow-control)", nil
 			}
-			if err := ralph.StopDaemon(paths); err != nil {
-				return "", err
-			}
-			pid, _, err := ralph.StartDaemon(paths)
-			if err != nil {
-				return "", err
-			}
-			return fmt.Sprintf("ralph-loop restarted (pid=%d)", pid), nil
+			return telegramRestartCommand(controlDir, paths, cmdArgs)
 
 		case "/doctor_repair":
 			if !allowControl {
 				return "control commands are disabled (run with --allow-control)", nil
 			}
-			actions, err := ralph.RepairProject(paths)
-			if err != nil {
-				return "", err
-			}
-			return formatDoctorRepairActions(actions), nil
+			return telegramDoctorRepairCommand(controlDir, paths, cmdArgs)
 
 		case "/recover":
 			if !allowControl {
 				return "control commands are disabled (run with --allow-control)", nil
 			}
-			recovered, err := ralph.RecoverInProgressWithCount(paths)
-			if err != nil {
-				return "", err
-			}
-			return fmt.Sprintf("recovered in-progress issues: %d", recovered), nil
+			return telegramRecoverCommand(controlDir, paths, cmdArgs)
 
 		default:
 			return "unknown command\n\n" + buildTelegramHelp(allowControl), nil
 		}
 	}
+}
+
+type telegramTargetSpec struct {
+	All       bool
+	ProjectID string
+}
+
+func (s telegramTargetSpec) HasTarget() bool {
+	return s.All || strings.TrimSpace(s.ProjectID) != ""
+}
+
+func (s telegramTargetSpec) Label() string {
+	if s.All {
+		return "all"
+	}
+	if strings.TrimSpace(s.ProjectID) == "" {
+		return "current"
+	}
+	return s.ProjectID
+}
+
+func parseTelegramTargetSpec(raw string) (telegramTargetSpec, error) {
+	fields := strings.Fields(strings.TrimSpace(raw))
+	if len(fields) == 0 {
+		return telegramTargetSpec{}, nil
+	}
+	if len(fields) > 1 {
+		return telegramTargetSpec{}, fmt.Errorf("invalid target: use one value ('all' or project id)")
+	}
+	target := strings.TrimSpace(fields[0])
+	if target == "" {
+		return telegramTargetSpec{}, nil
+	}
+	switch strings.ToLower(target) {
+	case "all", "*":
+		return telegramTargetSpec{All: true}, nil
+	default:
+		return telegramTargetSpec{ProjectID: target}, nil
+	}
+}
+
+func resolveTelegramFleetPaths(controlDir string, spec telegramTargetSpec) ([]ralph.FleetProject, map[string]ralph.Paths, error) {
+	if !spec.HasTarget() {
+		return nil, nil, fmt.Errorf("fleet target is required")
+	}
+	projects, err := ralph.ResolveFleetProjects(controlDir, spec.ProjectID, spec.All)
+	if err != nil {
+		return nil, nil, err
+	}
+	pathsByID := make(map[string]ralph.Paths, len(projects))
+	for _, p := range projects {
+		paths, err := ralph.NewPaths(controlDir, p.ProjectDir)
+		if err != nil {
+			return nil, nil, err
+		}
+		pathsByID[p.ID] = paths
+	}
+	return projects, pathsByID, nil
+}
+
+func telegramStatusCommand(controlDir string, paths ralph.Paths, rawArgs string) (string, error) {
+	spec, err := parseTelegramTargetSpec(rawArgs)
+	if err != nil {
+		return "", err
+	}
+	if !spec.HasTarget() {
+		st, err := ralph.GetStatus(paths)
+		if err != nil {
+			return "", err
+		}
+		return formatStatusForTelegram(st), nil
+	}
+	var b bytes.Buffer
+	if err := renderFleetDashboard(controlDir, spec.ProjectID, spec.All, &b); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+func telegramFleetDashboardCommand(controlDir, rawArgs string) (string, error) {
+	spec, err := parseTelegramTargetSpec(rawArgs)
+	if err != nil {
+		return "", err
+	}
+	projectID := ""
+	all := true
+	if spec.HasTarget() {
+		projectID = spec.ProjectID
+		all = spec.All
+	}
+	var b bytes.Buffer
+	if err := renderFleetDashboard(controlDir, projectID, all, &b); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+func telegramDoctorCommand(controlDir string, paths ralph.Paths, rawArgs string) (string, error) {
+	spec, err := parseTelegramTargetSpec(rawArgs)
+	if err != nil {
+		return "", err
+	}
+	if !spec.HasTarget() {
+		report, err := ralph.RunDoctor(paths)
+		if err != nil {
+			return "", err
+		}
+		return formatDoctorReportForTelegram(report), nil
+	}
+	return runFleetDoctorReports(controlDir, spec)
+}
+
+func telegramStartCommand(controlDir string, paths ralph.Paths, rawArgs string) (string, error) {
+	spec, err := parseTelegramTargetSpec(rawArgs)
+	if err != nil {
+		return "", err
+	}
+	if !spec.HasTarget() {
+		res, err := startProjectDaemon(paths, startOptions{
+			DoctorRepair: true,
+			FixPerms:     false,
+			Out:          io.Discard,
+		})
+		if err != nil {
+			return "", err
+		}
+		return res, nil
+	}
+	if err := runFleetCommand(controlDir, buildFleetTargetArgs("start", spec)); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("fleet start completed (target=%s)", spec.Label()), nil
+}
+
+func telegramStopCommand(controlDir string, paths ralph.Paths, rawArgs string) (string, error) {
+	spec, err := parseTelegramTargetSpec(rawArgs)
+	if err != nil {
+		return "", err
+	}
+	if !spec.HasTarget() {
+		if err := ralph.StopDaemon(paths); err != nil {
+			return "", err
+		}
+		return "ralph-loop stopped", nil
+	}
+	if err := runFleetCommand(controlDir, buildFleetTargetArgs("stop", spec)); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("fleet stop completed (target=%s)", spec.Label()), nil
+}
+
+func telegramRestartCommand(controlDir string, paths ralph.Paths, rawArgs string) (string, error) {
+	spec, err := parseTelegramTargetSpec(rawArgs)
+	if err != nil {
+		return "", err
+	}
+	if !spec.HasTarget() {
+		if err := ralph.StopDaemon(paths); err != nil {
+			return "", err
+		}
+		pid, _, err := ralph.StartDaemon(paths)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("ralph-loop restarted (pid=%d)", pid), nil
+	}
+	if err := runFleetCommand(controlDir, buildFleetTargetArgs("stop", spec)); err != nil {
+		return "", err
+	}
+	if err := runFleetCommand(controlDir, buildFleetTargetArgs("start", spec)); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("fleet restart completed (target=%s)", spec.Label()), nil
+}
+
+func telegramDoctorRepairCommand(controlDir string, paths ralph.Paths, rawArgs string) (string, error) {
+	spec, err := parseTelegramTargetSpec(rawArgs)
+	if err != nil {
+		return "", err
+	}
+	if !spec.HasTarget() {
+		actions, err := ralph.RepairProject(paths)
+		if err != nil {
+			return "", err
+		}
+		return formatDoctorRepairActions(actions), nil
+	}
+	projects, pathsByID, err := resolveTelegramFleetPaths(controlDir, spec)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "fleet doctor repair completed (target=%s)\n", spec.Label())
+	for _, p := range projects {
+		actions, err := ralph.RepairProject(pathsByID[p.ID])
+		if err != nil {
+			fmt.Fprintf(&b, "- project=%s status=fail detail=%s\n", p.ID, compactSingleLine(err.Error(), 160))
+			continue
+		}
+		pass, warn, fail := countDoctorRepairActions(actions)
+		fmt.Fprintf(&b, "- project=%s pass=%d warn=%d fail=%d\n", p.ID, pass, warn, fail)
+	}
+	return b.String(), nil
+}
+
+func telegramRecoverCommand(controlDir string, paths ralph.Paths, rawArgs string) (string, error) {
+	spec, err := parseTelegramTargetSpec(rawArgs)
+	if err != nil {
+		return "", err
+	}
+	if !spec.HasTarget() {
+		recovered, err := ralph.RecoverInProgressWithCount(paths)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("recovered in-progress issues: %d", recovered), nil
+	}
+	projects, pathsByID, err := resolveTelegramFleetPaths(controlDir, spec)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	total := 0
+	for _, p := range projects {
+		recovered, err := ralph.RecoverInProgressWithCount(pathsByID[p.ID])
+		if err != nil {
+			fmt.Fprintf(&b, "- project=%s status=fail detail=%s\n", p.ID, compactSingleLine(err.Error(), 160))
+			continue
+		}
+		total += recovered
+		fmt.Fprintf(&b, "- project=%s recovered=%d\n", p.ID, recovered)
+	}
+	fmt.Fprintf(&b, "fleet recover completed (target=%s total=%d)", spec.Label(), total)
+	return b.String(), nil
+}
+
+func buildFleetTargetArgs(sub string, spec telegramTargetSpec) []string {
+	args := []string{sub}
+	if spec.All {
+		return append(args, "--all")
+	}
+	if strings.TrimSpace(spec.ProjectID) != "" {
+		return append(args, "--id", spec.ProjectID)
+	}
+	return args
+}
+
+func runFleetDoctorReports(controlDir string, spec telegramTargetSpec) (string, error) {
+	projects, pathsByID, err := resolveTelegramFleetPaths(controlDir, spec)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Ralph Fleet Doctor\n")
+	fmt.Fprintf(&b, "- target: %s\n", spec.Label())
+	fmt.Fprintf(&b, "- projects: %d\n", len(projects))
+	for _, p := range projects {
+		report, err := ralph.RunDoctor(pathsByID[p.ID])
+		if err != nil {
+			fmt.Fprintf(&b, "- project=%s status=fail detail=%s\n", p.ID, compactSingleLine(err.Error(), 160))
+			continue
+		}
+		pass, warn, fail := countDoctorChecks(report)
+		fmt.Fprintf(&b, "- project=%s pass=%d warn=%d fail=%d\n", p.ID, pass, warn, fail)
+	}
+	return b.String(), nil
 }
 
 func parseTelegramCommandLine(raw string) (string, string) {
@@ -444,17 +750,17 @@ func buildTelegramHelp(allowControl bool) string {
 		"Ralph Telegram commands",
 		"- /help",
 		"- /ping",
-		"- /status",
-		"- /doctor",
-		"- /fleet",
+		"- /status [all|<project_id>]",
+		"- /doctor [all|<project_id>]",
+		"- /fleet [all|<project_id>]",
 	}
 	if allowControl {
 		lines = append(lines,
-			"- /start",
-			"- /stop",
-			"- /restart",
-			"- /doctor_repair",
-			"- /recover",
+			"- /start [all|<project_id>]",
+			"- /stop [all|<project_id>]",
+			"- /restart [all|<project_id>]",
+			"- /doctor_repair [all|<project_id>]",
+			"- /recover [all|<project_id>]",
 		)
 	} else {
 		lines = append(lines, "- control commands disabled (--allow-control)")
@@ -487,17 +793,7 @@ func formatStatusForTelegram(st ralph.Status) string {
 }
 
 func formatDoctorReportForTelegram(report ralph.DoctorReport) string {
-	pass, warn, fail := 0, 0, 0
-	for _, c := range report.Checks {
-		switch c.Status {
-		case "pass":
-			pass++
-		case "warn":
-			warn++
-		case "fail":
-			fail++
-		}
-	}
+	pass, warn, fail := countDoctorChecks(report)
 
 	var b strings.Builder
 	fmt.Fprintln(&b, "Ralph Doctor")
@@ -520,6 +816,35 @@ func formatDoctorReportForTelegram(report ralph.DoctorReport) string {
 }
 
 func formatDoctorRepairActions(actions []ralph.DoctorRepairAction) string {
+	pass, warn, fail := countDoctorRepairActions(actions)
+	var b strings.Builder
+	fmt.Fprintf(&b, "doctor repair completed\n")
+	fmt.Fprintf(&b, "- summary: pass=%d warn=%d fail=%d\n", pass, warn, fail)
+	for _, a := range actions {
+		if a.Status == "pass" {
+			continue
+		}
+		fmt.Fprintf(&b, "- [%s] %s: %s\n", a.Status, a.Name, compactSingleLine(a.Detail, 120))
+	}
+	return b.String()
+}
+
+func countDoctorChecks(report ralph.DoctorReport) (int, int, int) {
+	pass, warn, fail := 0, 0, 0
+	for _, c := range report.Checks {
+		switch c.Status {
+		case "pass":
+			pass++
+		case "warn":
+			warn++
+		case "fail":
+			fail++
+		}
+	}
+	return pass, warn, fail
+}
+
+func countDoctorRepairActions(actions []ralph.DoctorRepairAction) (int, int, int) {
 	pass, warn, fail := 0, 0, 0
 	for _, a := range actions {
 		switch a.Status {
@@ -531,16 +856,117 @@ func formatDoctorRepairActions(actions []ralph.DoctorRepairAction) string {
 			fail++
 		}
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "doctor repair completed\n")
-	fmt.Fprintf(&b, "- summary: pass=%d warn=%d fail=%d\n", pass, warn, fail)
-	for _, a := range actions {
-		if a.Status == "pass" {
-			continue
-		}
-		fmt.Fprintf(&b, "- [%s] %s: %s\n", a.Status, a.Name, compactSingleLine(a.Detail, 120))
+	return pass, warn, fail
+}
+
+func normalizeNotifyScope(raw string) (string, error) {
+	scope := strings.ToLower(strings.TrimSpace(raw))
+	if scope == "" {
+		scope = "auto"
 	}
-	return b.String()
+	switch scope {
+	case "auto", "project", "fleet":
+		return scope, nil
+	default:
+		return "", fmt.Errorf("expected one of auto|project|fleet")
+	}
+}
+
+func requiresUserAllowlistForControl(allowedChatIDs map[int64]struct{}) bool {
+	for chatID := range allowedChatIDs {
+		if chatID < 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func newScopedStatusNotifyHandler(controlDir string, paths ralph.Paths, scope string, retryThreshold, permThreshold int) ralph.TelegramNotifyHandler {
+	switch scope {
+	case "fleet":
+		return newFleetStatusNotifyHandler(controlDir, paths, retryThreshold, permThreshold)
+	case "auto":
+		enabled, err := hasFleetProjects(controlDir)
+		if err != nil || !enabled {
+			return newStatusNotifyHandler(paths, retryThreshold, permThreshold)
+		}
+		return newFleetStatusNotifyHandler(controlDir, paths, retryThreshold, permThreshold)
+	default:
+		return newStatusNotifyHandler(paths, retryThreshold, permThreshold)
+	}
+}
+
+func hasFleetProjects(controlDir string) (bool, error) {
+	cfg, err := ralph.LoadFleetConfig(controlDir)
+	if err != nil {
+		return false, err
+	}
+	return len(cfg.Projects) > 0, nil
+}
+
+func newFleetStatusNotifyHandler(controlDir string, defaultPaths ralph.Paths, retryThreshold, permThreshold int) ralph.TelegramNotifyHandler {
+	initialized := false
+	prevByProject := map[string]ralph.Status{}
+	return func(ctx context.Context) ([]string, error) {
+		_ = ctx
+
+		cfg, err := ralph.LoadFleetConfig(controlDir)
+		if err != nil {
+			return nil, err
+		}
+
+		type notifyProject struct {
+			ID       string
+			Paths    ralph.Paths
+			FullName string
+		}
+		targets := make([]notifyProject, 0, len(cfg.Projects))
+		if len(cfg.Projects) == 0 {
+			targets = append(targets, notifyProject{
+				ID:       "current",
+				Paths:    defaultPaths,
+				FullName: defaultPaths.ProjectDir,
+			})
+		} else {
+			for _, p := range cfg.Projects {
+				projectPaths, err := ralph.NewPaths(controlDir, p.ProjectDir)
+				if err != nil {
+					return nil, err
+				}
+				targets = append(targets, notifyProject{
+					ID:       p.ID,
+					Paths:    projectPaths,
+					FullName: p.ProjectDir,
+				})
+			}
+		}
+
+		alerts := []string{}
+		currByProject := make(map[string]ralph.Status, len(targets))
+		for _, target := range targets {
+			current, err := ralph.GetStatus(target.Paths)
+			if err != nil {
+				return nil, err
+			}
+			current.ProjectDir = fmt.Sprintf("%s (%s)", target.ID, target.FullName)
+			currByProject[target.ID] = current
+			if !initialized {
+				continue
+			}
+			prev, ok := prevByProject[target.ID]
+			if !ok {
+				continue
+			}
+			alerts = append(alerts, buildStatusAlerts(prev, current, retryThreshold, permThreshold)...)
+		}
+
+		prevByProject = currByProject
+		if !initialized {
+			initialized = true
+			return nil, nil
+		}
+		return alerts, nil
+	}
 }
 
 func newStatusNotifyHandler(paths ralph.Paths, retryThreshold, permThreshold int) ralph.TelegramNotifyHandler {

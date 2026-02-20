@@ -24,6 +24,7 @@ type TelegramNotifyHandler func(ctx context.Context) ([]string, error)
 type TelegramBotOptions struct {
 	Token             string
 	AllowedChatIDs    map[int64]struct{}
+	AllowedUserIDs    map[int64]struct{}
 	PollTimeoutSec    int
 	NotifyIntervalSec int
 	OffsetFile        string
@@ -46,11 +47,16 @@ type telegramUpdate struct {
 }
 
 type telegramMessage struct {
-	Chat telegramChat `json:"chat"`
-	Text string       `json:"text"`
+	Chat telegramChat  `json:"chat"`
+	From *telegramUser `json:"from,omitempty"`
+	Text string        `json:"text"`
 }
 
 type telegramChat struct {
+	ID int64 `json:"id"`
+}
+
+type telegramUser struct {
 	ID int64 `json:"id"`
 }
 
@@ -108,6 +114,8 @@ func RunTelegramBot(ctx context.Context, opts TelegramBotOptions) error {
 	backoff := 2 * time.Second
 	nextNotifyAt := time.Now().UTC()
 	chatIDs := sortedTelegramChatIDs(opts.AllowedChatIDs)
+	unauthorizedLogCooldown := 60 * time.Second
+	lastUnauthorizedLogAt := map[string]time.Time{}
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -165,7 +173,12 @@ func RunTelegramBot(ctx context.Context, opts TelegramBotOptions) error {
 			}
 
 			if !isTelegramChatAllowed(opts.AllowedChatIDs, chatID) {
-				_ = telegramSendMessage(ctx, client, baseURL, token, chatID, "unauthorized chat")
+				telegramLogUnauthorized(out, lastUnauthorizedLogAt, unauthorizedLogCooldown, fmt.Sprintf("chat:%d", chatID), fmt.Sprintf("chat %d is not allowed", chatID))
+				continue
+			}
+			userID := telegramMessageUserID(upd.Message)
+			if !isTelegramUserAllowed(opts.AllowedUserIDs, userID) {
+				telegramLogUnauthorized(out, lastUnauthorizedLogAt, unauthorizedLogCooldown, fmt.Sprintf("user:%d:chat:%d", userID, chatID), fmt.Sprintf("user %d in chat %d is not allowed", userID, chatID))
 				continue
 			}
 
@@ -217,6 +230,28 @@ func ParseTelegramChatIDs(raw string) (map[int64]struct{}, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid chat id %q: %w", v, err)
 		}
+		if id == 0 {
+			return nil, fmt.Errorf("invalid chat id %q: must not be 0", v)
+		}
+		out[id] = struct{}{}
+	}
+	return out, nil
+}
+
+func ParseTelegramUserIDs(raw string) (map[int64]struct{}, error) {
+	out := map[int64]struct{}{}
+	for _, part := range strings.Split(raw, ",") {
+		v := strings.TrimSpace(part)
+		if v == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid user id %q: %w", v, err)
+		}
+		if id <= 0 {
+			return nil, fmt.Errorf("invalid user id %q: must be positive", v)
+		}
 		out[id] = struct{}{}
 	}
 	return out, nil
@@ -228,6 +263,38 @@ func isTelegramChatAllowed(allowed map[int64]struct{}, chatID int64) bool {
 	}
 	_, ok := allowed[chatID]
 	return ok
+}
+
+func isTelegramUserAllowed(allowed map[int64]struct{}, userID int64) bool {
+	// Backward-compatible default: if user allowlist is unset, chat allowlist is sufficient.
+	if len(allowed) == 0 {
+		return true
+	}
+	if userID <= 0 {
+		return false
+	}
+	_, ok := allowed[userID]
+	return ok
+}
+
+func telegramMessageUserID(msg *telegramMessage) int64 {
+	if msg == nil || msg.From == nil {
+		return 0
+	}
+	return msg.From.ID
+}
+
+func telegramLogUnauthorized(out io.Writer, last map[string]time.Time, cooldown time.Duration, key, detail string) {
+	if out == nil {
+		return
+	}
+	now := time.Now().UTC()
+	lastAt, ok := last[key]
+	if ok && now.Sub(lastAt) < cooldown {
+		return
+	}
+	last[key] = now
+	fmt.Fprintf(out, "[telegram] unauthorized access blocked: %s\n", detail)
 }
 
 func telegramGetUpdates(ctx context.Context, client *http.Client, baseURL, token string, offset int64, timeoutSec int) ([]telegramUpdate, int64, error) {
