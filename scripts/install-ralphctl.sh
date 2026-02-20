@@ -5,6 +5,8 @@ REPO="${RALPH_REPO:-emperorhan/codex-ralph}"
 VERSION="${RALPH_VERSION:-latest}"
 INSTALL_DIR="${RALPH_INSTALL_DIR:-}"
 VERIFY_SIGNATURE="${RALPH_VERIFY_SIGNATURE:-auto}"
+RELEASE_WAIT_ATTEMPTS="${RALPH_RELEASE_WAIT_ATTEMPTS:-18}"
+RELEASE_WAIT_INTERVAL_SEC="${RALPH_RELEASE_WAIT_INTERVAL_SEC:-10}"
 
 usage() {
   cat <<'EOF'
@@ -18,6 +20,8 @@ Env:
   RALPH_INSTALL_DIR        Install directory (default: ~/.local/bin or /usr/local/bin if root)
   RALPH_REPO               GitHub repo (default: emperorhan/codex-ralph)
   RALPH_VERIFY_SIGNATURE   auto|true|false (default: auto)
+  RALPH_RELEASE_WAIT_ATTEMPTS      wait attempts for newly published release assets (default: 18)
+  RALPH_RELEASE_WAIT_INTERVAL_SEC  wait interval seconds between attempts (default: 10)
 
 Examples:
   curl -fsSL https://raw.githubusercontent.com/emperorhan/codex-ralph/main/scripts/install-ralphctl.sh | bash
@@ -82,6 +86,47 @@ fetch_stdout() {
   fi
   echo "curl or wget is required" >&2
   exit 1
+}
+
+url_exists() {
+  local url="$1"
+  if has_cmd curl; then
+    curl -fsI "$url" >/dev/null
+    return
+  fi
+  if has_cmd wget; then
+    wget --spider -q "$url"
+    return
+  fi
+  echo "curl or wget is required" >&2
+  exit 1
+}
+
+wait_for_release_assets() {
+  local max_attempts="$1"
+  local interval_sec="$2"
+  shift 2
+
+  local attempt=1
+  while [ "$attempt" -le "$max_attempts" ]; do
+    local all_ready=true
+    for url in "$@"; do
+      if ! url_exists "$url"; then
+        all_ready=false
+        break
+      fi
+    done
+    if [ "$all_ready" = "true" ]; then
+      return 0
+    fi
+    if [ "$attempt" -lt "$max_attempts" ]; then
+      echo "[ralphctl-installer] release assets not ready yet (attempt ${attempt}/${max_attempts}); waiting ${interval_sec}s"
+      sleep "$interval_sec"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  return 1
 }
 
 sha256_file() {
@@ -168,6 +213,12 @@ echo "[ralphctl-installer] repo=${REPO}"
 echo "[ralphctl-installer] version=${VERSION}"
 echo "[ralphctl-installer] target=${OS}/${ARCH}"
 echo "[ralphctl-installer] install_dir=${INSTALL_DIR}"
+
+if ! wait_for_release_assets "${RELEASE_WAIT_ATTEMPTS}" "${RELEASE_WAIT_INTERVAL_SEC}" "${ASSET_URL}" "${CHECKSUMS_URL}"; then
+  echo "release assets are not available yet for ${VERSION}" >&2
+  echo "retry later or set RALPH_VERSION to a known available tag (e.g. v0.1.8)" >&2
+  exit 1
+fi
 
 fetch "${ASSET_URL}" "${TMP_DIR}/${ASSET}"
 fetch "${CHECKSUMS_URL}" "${TMP_DIR}/checksums.txt"
