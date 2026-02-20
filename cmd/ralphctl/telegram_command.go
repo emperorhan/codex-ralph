@@ -18,6 +18,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"codex-ralph/internal/ralph"
 )
@@ -2177,7 +2178,7 @@ func runTelegramPRDCodexExec(
 	)
 
 	cmd := exec.CommandContext(ctx, "codex", args...)
-	cmd.Stdin = strings.NewReader(prompt)
+	cmd.Stdin = strings.NewReader(sanitizeTelegramUTF8String(prompt))
 	cmd.Stdout = io.Discard
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -3265,7 +3266,7 @@ func appendTelegramPRDConversation(paths ralph.Paths, chatID int64, role, text s
 	if role == "" {
 		role = "assistant"
 	}
-	text = strings.TrimSpace(text)
+	text = strings.TrimSpace(sanitizeTelegramUTF8String(text))
 	if text == "" {
 		return nil
 	}
@@ -3293,6 +3294,7 @@ func readTelegramPRDConversationTail(paths ralph.Paths, chatID int64, maxRunes i
 	if err != nil {
 		return ""
 	}
+	data = bytes.ToValidUTF8(data, []byte("?"))
 	text := strings.TrimSpace(string(data))
 	if text == "" {
 		return ""
@@ -3302,6 +3304,16 @@ func readTelegramPRDConversationTail(paths ralph.Paths, chatID int64, maxRunes i
 		return text
 	}
 	return "...(truncated)\n" + string(runes[len(runes)-maxRunes:])
+}
+
+func sanitizeTelegramUTF8String(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if utf8.ValidString(raw) {
+		return raw
+	}
+	return string(bytes.ToValidUTF8([]byte(raw), []byte("?")))
 }
 
 func resolveTelegramPRDFilePath(paths ralph.Paths, chatID int64, raw string) (string, error) {

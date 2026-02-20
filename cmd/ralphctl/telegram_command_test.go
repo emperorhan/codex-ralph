@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"codex-ralph/internal/ralph"
 )
@@ -1362,6 +1363,40 @@ func TestTelegramPRDConversationTail(t *testing.T) {
 	tail := readTelegramPRDConversationTail(paths, 99, 200)
 	if !strings.Contains(tail, "첫 질문") || !strings.Contains(tail, "첫 응답") {
 		t.Fatalf("conversation tail should contain both entries: %q", tail)
+	}
+}
+
+func TestReadTelegramPRDConversationTailSanitizesInvalidUTF8(t *testing.T) {
+	t.Parallel()
+
+	controlDir := filepath.Join(t.TempDir(), "control")
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("mkdir control dir: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	paths, err := ralph.NewPaths(controlDir, projectDir)
+	if err != nil {
+		t.Fatalf("new paths failed: %v", err)
+	}
+
+	convPath := telegramPRDConversationFile(paths, 123)
+	if err := os.MkdirAll(filepath.Dir(convPath), 0o755); err != nil {
+		t.Fatalf("mkdir conversation dir: %v", err)
+	}
+	invalid := []byte{0xff, 0xfe, 'a', 'b', 'c'}
+	if err := os.WriteFile(convPath, invalid, 0o644); err != nil {
+		t.Fatalf("write invalid conversation failed: %v", err)
+	}
+
+	tail := readTelegramPRDConversationTail(paths, 123, 100)
+	if !utf8.ValidString(tail) {
+		t.Fatalf("conversation tail must be valid UTF-8: %q", tail)
+	}
+	if !strings.Contains(tail, "abc") {
+		t.Fatalf("conversation tail should preserve readable content: %q", tail)
 	}
 }
 
