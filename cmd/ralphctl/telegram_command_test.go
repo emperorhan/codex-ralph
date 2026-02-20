@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -499,80 +500,259 @@ func TestAdvanceTelegramPRDSessionFlow(t *testing.T) {
 		Stage:  telegramPRDStageAwaitProduct,
 	}
 	var err error
-	if s, _, err = advanceTelegramPRDSession(s, "Wallet"); err != nil {
+	if s, _, err = advanceTelegramPRDSession(ralph.Paths{}, s, "Wallet"); err != nil {
 		t.Fatalf("set product failed: %v", err)
 	}
 	if s.Stage != telegramPRDStageAwaitProblem {
 		t.Fatalf("stage mismatch after product: %s", s.Stage)
 	}
 
-	if s, _, err = advanceTelegramPRDSession(s, "결제 실패율이 높다"); err != nil {
+	if s, _, err = advanceTelegramPRDSession(ralph.Paths{}, s, "결제 실패율이 높다"); err != nil {
 		t.Fatalf("set problem failed: %v", err)
 	}
 	if s.Stage != telegramPRDStageAwaitGoal {
 		t.Fatalf("stage mismatch after problem: %s", s.Stage)
 	}
 
-	if s, _, err = advanceTelegramPRDSession(s, "실패율을 30%% 낮춘다"); err != nil {
+	if s, _, err = advanceTelegramPRDSession(ralph.Paths{}, s, "실패율을 30%% 낮춘다"); err != nil {
 		t.Fatalf("set goal failed: %v", err)
 	}
 	if s.Stage != telegramPRDStageAwaitInScope {
 		t.Fatalf("stage mismatch after goal: %s", s.Stage)
 	}
 
-	if s, _, err = advanceTelegramPRDSession(s, "결제 실패 재시도"); err != nil {
+	if s, _, err = advanceTelegramPRDSession(ralph.Paths{}, s, "결제 실패 재시도"); err != nil {
 		t.Fatalf("set in-scope failed: %v", err)
 	}
 	if s.Stage != telegramPRDStageAwaitOutOfScope {
 		t.Fatalf("stage mismatch after in-scope: %s", s.Stage)
 	}
 
-	if s, _, err = advanceTelegramPRDSession(s, "신규 PG 연동 제외"); err != nil {
+	if s, _, err = advanceTelegramPRDSession(ralph.Paths{}, s, "신규 PG 연동 제외"); err != nil {
 		t.Fatalf("set out-of-scope failed: %v", err)
 	}
 	if s.Stage != telegramPRDStageAwaitAcceptance {
 		t.Fatalf("stage mismatch after out-of-scope: %s", s.Stage)
 	}
 
-	if s, _, err = advanceTelegramPRDSession(s, "핵심 시나리오 3개 통과"); err != nil {
+	if s, _, err = advanceTelegramPRDSession(ralph.Paths{}, s, "핵심 시나리오 3개 통과"); err != nil {
 		t.Fatalf("set acceptance failed: %v", err)
 	}
 	if s.Stage != telegramPRDStageAwaitStoryTitle {
 		t.Fatalf("stage mismatch after acceptance: %s", s.Stage)
 	}
 
-	if s, _, err = advanceTelegramPRDSession(s, "결제 API 개선"); err != nil {
+	if s, _, err = advanceTelegramPRDSession(ralph.Paths{}, s, "결제 API 개선"); err != nil {
 		t.Fatalf("set title failed: %v", err)
 	}
 	if s.Stage != telegramPRDStageAwaitStoryDesc {
 		t.Fatalf("stage mismatch after title: %s", s.Stage)
 	}
 
-	if s, _, err = advanceTelegramPRDSession(s, "사용자 결제 실패율을 줄인다"); err != nil {
+	if s, _, err = advanceTelegramPRDSession(ralph.Paths{}, s, "사용자 결제 실패율을 줄인다"); err != nil {
 		t.Fatalf("set description failed: %v", err)
 	}
 	if s.Stage != telegramPRDStageAwaitStoryRole {
 		t.Fatalf("stage mismatch after desc: %s", s.Stage)
 	}
 
-	if s, _, err = advanceTelegramPRDSession(s, "developer"); err != nil {
+	if s, _, err = advanceTelegramPRDSession(ralph.Paths{}, s, "developer 10"); err != nil {
 		t.Fatalf("set role failed: %v", err)
 	}
-	if s.Stage != telegramPRDStageAwaitStoryPrio {
-		t.Fatalf("stage mismatch after role: %s", s.Stage)
-	}
-
-	if s, _, err = advanceTelegramPRDSession(s, "10"); err != nil {
-		t.Fatalf("set priority failed: %v", err)
-	}
 	if s.Stage != telegramPRDStageAwaitStoryTitle {
-		t.Fatalf("stage mismatch after priority: %s", s.Stage)
+		t.Fatalf("stage mismatch after role add: %s", s.Stage)
 	}
 	if len(s.Stories) != 1 {
 		t.Fatalf("story count mismatch: got=%d want=1", len(s.Stories))
 	}
 	if s.Stories[0].Role != "developer" || s.Stories[0].Priority != 10 {
 		t.Fatalf("story fields mismatch: role=%s priority=%d", s.Stories[0].Role, s.Stories[0].Priority)
+	}
+}
+
+func TestParseTelegramPRDStoryRoleAndPriorityInput(t *testing.T) {
+	t.Parallel()
+
+	session := telegramPRDSession{
+		Context: telegramPRDContext{
+			AgentPriority: map[string]int{
+				"manager":   910,
+				"planner":   920,
+				"developer": 930,
+				"qa":        940,
+			},
+		},
+	}
+
+	role, priority, explicit, err := parseTelegramPRDStoryRoleAndPriorityInput(session, "developer", "")
+	if err != nil {
+		t.Fatalf("parse role only failed: %v", err)
+	}
+	if role != "developer" || priority != 0 || explicit {
+		t.Fatalf("role-only parse mismatch: role=%s priority=%d explicit=%t", role, priority, explicit)
+	}
+
+	role, priority, explicit, err = parseTelegramPRDStoryRoleAndPriorityInput(session, "qa 777", "")
+	if err != nil {
+		t.Fatalf("parse role+priority failed: %v", err)
+	}
+	if role != "qa" || priority != 777 || !explicit {
+		t.Fatalf("role+priority parse mismatch: role=%s priority=%d explicit=%t", role, priority, explicit)
+	}
+
+	role, priority, explicit, err = parseTelegramPRDStoryRoleAndPriorityInput(session, "manager", "default")
+	if err != nil {
+		t.Fatalf("parse explicit default failed: %v", err)
+	}
+	if role != "manager" || priority != 0 || explicit {
+		t.Fatalf("explicit default parse mismatch: role=%s priority=%d explicit=%t", role, priority, explicit)
+	}
+}
+
+func TestParseTelegramPRDQuickStoryInput(t *testing.T) {
+	t.Parallel()
+
+	session := telegramPRDSession{
+		Context: telegramPRDContext{
+			AgentPriority: map[string]int{
+				"developer": 1200,
+			},
+		},
+	}
+
+	story, quick, err := parseTelegramPRDQuickStoryInput(session, "결제 실패 자동 복구 | 실패시 재시도와 알림 | developer")
+	if err != nil {
+		t.Fatalf("quick parse failed: %v", err)
+	}
+	if !quick {
+		t.Fatalf("quick flag should be true")
+	}
+	if story.Role != "developer" || story.Priority != 0 {
+		t.Fatalf("quick parse role/priority mismatch: role=%s priority=%d", story.Role, story.Priority)
+	}
+
+	story, quick, err = parseTelegramPRDQuickStoryInput(session, "알림 개선 | 상태 가시성 강화 | qa | 555")
+	if err != nil {
+		t.Fatalf("quick parse with explicit priority failed: %v", err)
+	}
+	if !quick {
+		t.Fatalf("quick flag should be true")
+	}
+	if story.Role != "qa" || story.Priority != 555 {
+		t.Fatalf("quick parse explicit priority mismatch: role=%s priority=%d", story.Role, story.Priority)
+	}
+}
+
+func TestParseTelegramPRDAgentPriorityArgs(t *testing.T) {
+	t.Parallel()
+
+	got, err := parseTelegramPRDAgentPriorityArgs("manager=900 planner:950 developer=1000 qa=1100")
+	if err != nil {
+		t.Fatalf("parse agent priority failed: %v", err)
+	}
+	if got["manager"] != 900 || got["planner"] != 950 || got["developer"] != 1000 || got["qa"] != 1100 {
+		t.Fatalf("agent priority parse mismatch: %+v", got)
+	}
+
+	if _, err := parseTelegramPRDAgentPriorityArgs("invalid=1"); err == nil {
+		t.Fatalf("invalid role should fail")
+	}
+	if _, err := parseTelegramPRDAgentPriorityArgs("developer=0"); err == nil {
+		t.Fatalf("non-positive priority should fail")
+	}
+}
+
+func TestResolveTelegramPRDStoryPriorityUsesCodexEstimator(t *testing.T) {
+	old := telegramPRDStoryPriorityEstimator
+	t.Cleanup(func() { telegramPRDStoryPriorityEstimator = old })
+	telegramPRDStoryPriorityEstimator = func(_ ralph.Paths, _ telegramPRDSession, _ telegramPRDStory) (int, string, error) {
+		return 777, "codex_auto", nil
+	}
+
+	session := telegramPRDSession{
+		Context: telegramPRDContext{
+			AgentPriority: map[string]int{
+				"developer": 1000,
+			},
+		},
+	}
+	story := telegramPRDStory{Role: "developer"}
+	priority, source := resolveTelegramPRDStoryPriority(ralph.Paths{}, session, story)
+	if priority != 777 || source != "codex_auto" {
+		t.Fatalf("priority resolve mismatch: priority=%d source=%s", priority, source)
+	}
+}
+
+func TestResolveTelegramPRDStoryPriorityFallsBackOnEstimatorError(t *testing.T) {
+	old := telegramPRDStoryPriorityEstimator
+	t.Cleanup(func() { telegramPRDStoryPriorityEstimator = old })
+	telegramPRDStoryPriorityEstimator = func(_ ralph.Paths, _ telegramPRDSession, _ telegramPRDStory) (int, string, error) {
+		return 0, "", fmt.Errorf("codex unavailable")
+	}
+
+	session := telegramPRDSession{
+		Context: telegramPRDContext{
+			AgentPriority: map[string]int{
+				"developer": 1234,
+			},
+		},
+	}
+	story := telegramPRDStory{Role: "developer"}
+	priority, source := resolveTelegramPRDStoryPriority(ralph.Paths{}, session, story)
+	if priority != 1234 || source != "fallback_role_profile" {
+		t.Fatalf("fallback resolve mismatch: priority=%d source=%s", priority, source)
+	}
+}
+
+func TestAdvanceTelegramPRDSessionRoleWithoutPriorityUsesEstimator(t *testing.T) {
+	old := telegramPRDStoryPriorityEstimator
+	t.Cleanup(func() { telegramPRDStoryPriorityEstimator = old })
+	telegramPRDStoryPriorityEstimator = func(_ ralph.Paths, _ telegramPRDSession, _ telegramPRDStory) (int, string, error) {
+		return 888, "codex_auto", nil
+	}
+
+	s := telegramPRDSession{
+		ChatID:      1,
+		Stage:       telegramPRDStageAwaitStoryRole,
+		ProductName: "Wallet",
+		DraftTitle:  "결제 실패 자동 복구",
+		DraftDesc:   "실패 시 자동 재시도와 알림",
+		Context: telegramPRDContext{
+			Problem:    "실패율 높음",
+			Goal:       "복구 시간 단축",
+			InScope:    "재시도/알림",
+			OutOfScope: "신규 PG",
+			Acceptance: "핵심 시나리오 통과",
+		},
+	}
+	updated, reply, err := advanceTelegramPRDSession(ralph.Paths{}, s, "developer")
+	if err != nil {
+		t.Fatalf("advance failed: %v", err)
+	}
+	if updated.Stage != telegramPRDStageAwaitStoryTitle {
+		t.Fatalf("stage should return to title: %s", updated.Stage)
+	}
+	if len(updated.Stories) != 1 || updated.Stories[0].Priority != 888 {
+		t.Fatalf("story priority should come from estimator: %+v", updated.Stories)
+	}
+	if !strings.Contains(reply, "priority_source: codex_auto") {
+		t.Fatalf("reply should include codex priority source: %q", reply)
+	}
+}
+
+func TestParseTelegramPRDCodexStoryPriorityResponse(t *testing.T) {
+	t.Parallel()
+
+	raw := "```json\n{\"priority\":95,\"reason\":\"운영 영향도가 높음\"}\n```"
+	parsed, err := parseTelegramPRDCodexStoryPriorityResponse(raw)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if parsed.Priority != 100 {
+		t.Fatalf("priority should be clamped to minimum 100: %d", parsed.Priority)
+	}
+	if parsed.Reason == "" {
+		t.Fatalf("reason should not be empty")
 	}
 }
 
@@ -668,47 +848,111 @@ func TestEvaluateTelegramPRDClarityAssumedValueRequiresRefine(t *testing.T) {
 	}
 }
 
-func TestAdvanceTelegramPRDSessionQuestionDoesNotAdvance(t *testing.T) {
+func TestAdvanceTelegramPRDSessionQuestionInputAdvancesWithoutAssist(t *testing.T) {
 	t.Parallel()
 
 	s := telegramPRDSession{
-		ChatID: 1,
-		Stage:  telegramPRDStageAwaitInScope,
+		ChatID:      1,
+		Stage:       telegramPRDStageAwaitInScope,
+		ProductName: "Ralph",
+		Context: telegramPRDContext{
+			Problem: "문제",
+			Goal:    "목표",
+		},
 	}
-	updated, reply, err := advanceTelegramPRDSession(s, "포함 범위가 뭐지?")
+	updated, reply, err := advanceTelegramPRDSession(ralph.Paths{}, s, "포함 범위가 뭐지?")
 	if err != nil {
 		t.Fatalf("advance failed: %v", err)
 	}
-	if updated.Stage != telegramPRDStageAwaitInScope {
-		t.Fatalf("stage should stay same on question input: got=%s", updated.Stage)
+	if updated.Stage == telegramPRDStageAwaitInScope {
+		t.Fatalf("stage should advance once value is submitted: got=%s", updated.Stage)
 	}
-	if !strings.Contains(reply, "in-scope 설명") {
-		t.Fatalf("expected help reply for in-scope question, got=%q", reply)
+	if strings.TrimSpace(updated.Context.InScope) != "포함 범위가 뭐지?" {
+		t.Fatalf("in-scope should keep raw input when assist is bypassed: %q", updated.Context.InScope)
+	}
+	if !strings.Contains(reply, "prd refine question") {
+		t.Fatalf("expected refine reply, got=%q", reply)
 	}
 }
 
-func TestIsLikelyTelegramPRDRecommendationRequest(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		in   string
-		want bool
-	}{
-		{in: "추천해줘", want: true},
-		{in: "제안 부탁해", want: true},
-		{in: "what should be in scope?", want: false},
-		{in: "best practice로 알려줘", want: true},
-		{in: "그냥 값 입력", want: false},
+func TestTelegramPRDAssistInputUsesCodexRecommendForStoryTitle(t *testing.T) {
+	old := telegramPRDCodexAssistAnalyzer
+	t.Cleanup(func() { telegramPRDCodexAssistAnalyzer = old })
+	telegramPRDCodexAssistAnalyzer = func(_ ralph.Paths, _ telegramPRDSession, _ string) (telegramPRDCodexAssistResponse, error) {
+		return telegramPRDCodexAssistResponse{
+			Intent: "recommend",
+			Reply:  "story title 추천\n- 결제 실패 자동 복구",
+		}, nil
 	}
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.in, func(t *testing.T) {
-			t.Parallel()
-			got := isLikelyTelegramPRDRecommendationRequest(tt.in)
-			if got != tt.want {
-				t.Fatalf("isLikelyTelegramPRDRecommendationRequest(%q)=%t want=%t", tt.in, got, tt.want)
-			}
-		})
+
+	session := telegramPRDSession{
+		ChatID: 1,
+		Stage:  telegramPRDStageAwaitStoryTitle,
+	}
+	assist, err := telegramPRDAssistInput(ralph.Paths{}, session, "추천해줘")
+	if err != nil {
+		t.Fatalf("assist failed: %v", err)
+	}
+	if !assist.Handled {
+		t.Fatalf("recommend intent should be handled")
+	}
+	if !strings.Contains(assist.Reply, "story title 추천") {
+		t.Fatalf("unexpected assist reply: %q", assist.Reply)
+	}
+	if assist.InputOverride != "" {
+		t.Fatalf("recommend intent should not override input: %q", assist.InputOverride)
+	}
+}
+
+func TestTelegramPRDAssistInputUsesCodexNormalizedAnswer(t *testing.T) {
+	old := telegramPRDCodexAssistAnalyzer
+	t.Cleanup(func() { telegramPRDCodexAssistAnalyzer = old })
+	telegramPRDCodexAssistAnalyzer = func(_ ralph.Paths, _ telegramPRDSession, _ string) (telegramPRDCodexAssistResponse, error) {
+		return telegramPRDCodexAssistResponse{
+			Intent:           "answer",
+			NormalizedAnswer: "결제 실패 자동 복구",
+		}, nil
+	}
+
+	session := telegramPRDSession{
+		ChatID: 1,
+		Stage:  telegramPRDStageAwaitStoryTitle,
+	}
+	assist, err := telegramPRDAssistInput(ralph.Paths{}, session, "제목은 결제 실패 자동 복구")
+	if err != nil {
+		t.Fatalf("assist failed: %v", err)
+	}
+	if assist.Handled {
+		t.Fatalf("answer intent should not be handled as reply")
+	}
+	if assist.InputOverride != "결제 실패 자동 복구" {
+		t.Fatalf("normalized answer should be used as override: %q", assist.InputOverride)
+	}
+}
+
+func TestTelegramPRDAssistInputFallbackReplyWhenCodexReplyEmpty(t *testing.T) {
+	old := telegramPRDCodexAssistAnalyzer
+	t.Cleanup(func() { telegramPRDCodexAssistAnalyzer = old })
+	telegramPRDCodexAssistAnalyzer = func(_ ralph.Paths, _ telegramPRDSession, _ string) (telegramPRDCodexAssistResponse, error) {
+		return telegramPRDCodexAssistResponse{
+			Intent: "clarify",
+			Reply:  "",
+		}, nil
+	}
+
+	session := telegramPRDSession{
+		ChatID: 1,
+		Stage:  telegramPRDStageAwaitStoryRole,
+	}
+	assist, err := telegramPRDAssistInput(ralph.Paths{}, session, "무슨 role?")
+	if err != nil {
+		t.Fatalf("assist failed: %v", err)
+	}
+	if !assist.Handled {
+		t.Fatalf("clarify intent should be handled")
+	}
+	if !strings.Contains(assist.Reply, "manager|planner|developer|qa") {
+		t.Fatalf("fallback guide should include role options: %q", assist.Reply)
 	}
 }
 
@@ -744,6 +988,89 @@ func TestParseTelegramPRDCodexScoreResponse(t *testing.T) {
 	}
 	if got.Summary == "" {
 		t.Fatalf("summary should not be empty")
+	}
+}
+
+func TestParseTelegramPRDCodexRefineResponse(t *testing.T) {
+	t.Parallel()
+
+	raw := "```json\n{\"score\":72,\"ready_to_apply\":false,\"ask\":\"핵심 성공 지표를 한 줄로 써주세요\",\"missing\":[\"success metric\"],\"suggested_stage\":\"await_goal\",\"reason\":\"목표 정량화가 부족\"}\n```"
+	got, err := parseTelegramPRDCodexRefineResponse(raw)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if got.Score != 72 {
+		t.Fatalf("score mismatch: got=%d want=72", got.Score)
+	}
+	if got.ReadyToApply {
+		t.Fatalf("ready_to_apply should be false")
+	}
+	if got.Ask == "" || got.SuggestedStage != telegramPRDStageAwaitGoal {
+		t.Fatalf("parsed refine response mismatch: %+v", got)
+	}
+}
+
+func TestTelegramPRDRefineSessionUsesCodexDynamicQuestion(t *testing.T) {
+	old := telegramPRDRefineAnalyzer
+	t.Cleanup(func() { telegramPRDRefineAnalyzer = old })
+	telegramPRDRefineAnalyzer = func(_ ralph.Paths, _ telegramPRDSession) (telegramPRDCodexRefineResponse, error) {
+		return telegramPRDCodexRefineResponse{
+			Score:          68,
+			ReadyToApply:   false,
+			Ask:            "이번 배포에서 반드시 만족해야 할 성공 지표를 한 줄로 입력하세요",
+			Missing:        []string{"success metric"},
+			SuggestedStage: telegramPRDStageAwaitGoal,
+			Reason:         "goal이 정량화되지 않아 우선 보강 필요",
+		}, nil
+	}
+
+	controlDir := filepath.Join(t.TempDir(), "control")
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("mkdir control dir: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	paths, err := ralph.NewPaths(controlDir, projectDir)
+	if err != nil {
+		t.Fatalf("new paths failed: %v", err)
+	}
+	session := telegramPRDSession{
+		ChatID:      77,
+		Stage:       telegramPRDStageAwaitProblem,
+		ProductName: "Wallet",
+		Context: telegramPRDContext{
+			Problem: "실패율이 높다",
+		},
+	}
+	if err := telegramUpsertPRDSession(paths, session); err != nil {
+		t.Fatalf("upsert session failed: %v", err)
+	}
+
+	reply, err := telegramPRDRefineSession(paths, 77)
+	if err != nil {
+		t.Fatalf("refine session failed: %v", err)
+	}
+	if !strings.Contains(reply, "scoring_mode: codex") {
+		t.Fatalf("refine reply should use codex scoring mode: %q", reply)
+	}
+	if !strings.Contains(reply, "성공 지표") {
+		t.Fatalf("refine reply should contain codex ask question: %q", reply)
+	}
+
+	updated, found, err := telegramLoadPRDSession(paths, 77)
+	if err != nil {
+		t.Fatalf("load updated session failed: %v", err)
+	}
+	if !found {
+		t.Fatalf("updated session not found")
+	}
+	if updated.Stage != telegramPRDStageAwaitGoal {
+		t.Fatalf("session stage should follow codex suggested_stage: %s", updated.Stage)
+	}
+	if updated.CodexScore != 68 {
+		t.Fatalf("codex score should be stored: %d", updated.CodexScore)
 	}
 }
 
@@ -842,6 +1169,12 @@ func TestWriteTelegramPRDFile(t *testing.T) {
 			InScope:    "재시도 로직",
 			OutOfScope: "신규 PG",
 			Acceptance: "핵심 시나리오 통과",
+			AgentPriority: map[string]int{
+				"manager":   900,
+				"planner":   950,
+				"developer": 1000,
+				"qa":        1100,
+			},
 		},
 		Stories: []telegramPRDStory{
 			{ID: "US-001", Title: "결제", Description: "설명", Role: "developer", Priority: 10},
@@ -862,6 +1195,9 @@ func TestWriteTelegramPRDFile(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "\"problem\"") {
 		t.Fatalf("prd file should include context metadata: %s", string(content))
+	}
+	if !strings.Contains(string(content), "\"agent_priority\"") {
+		t.Fatalf("prd file should include agent priority metadata: %s", string(content))
 	}
 }
 
@@ -988,5 +1324,8 @@ func TestBuildTelegramPRDAssistPromptIncludesConversation(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "이전 입력") {
 		t.Fatalf("assist prompt should include conversation content: %q", prompt)
+	}
+	if !strings.Contains(prompt, "Expected answer format:") {
+		t.Fatalf("assist prompt should include expected answer format: %q", prompt)
 	}
 }

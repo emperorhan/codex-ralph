@@ -929,6 +929,8 @@ const (
 	telegramPRDCodexAssistTimeoutSec  = 45
 )
 
+var telegramPRDRoleOrder = []string{"manager", "planner", "developer", "qa"}
+
 type telegramPRDStory struct {
 	ID          string `json:"id"`
 	Title       string `json:"title"`
@@ -942,13 +944,14 @@ type telegramPRDDocument struct {
 }
 
 type telegramPRDContext struct {
-	Problem     string   `json:"problem,omitempty"`
-	Goal        string   `json:"goal,omitempty"`
-	InScope     string   `json:"in_scope,omitempty"`
-	OutOfScope  string   `json:"out_of_scope,omitempty"`
-	Acceptance  string   `json:"acceptance,omitempty"`
-	Constraints string   `json:"constraints,omitempty"`
-	Assumptions []string `json:"assumptions,omitempty"`
+	Problem       string         `json:"problem,omitempty"`
+	Goal          string         `json:"goal,omitempty"`
+	InScope       string         `json:"in_scope,omitempty"`
+	OutOfScope    string         `json:"out_of_scope,omitempty"`
+	Acceptance    string         `json:"acceptance,omitempty"`
+	Constraints   string         `json:"constraints,omitempty"`
+	Assumptions   []string       `json:"assumptions,omitempty"`
+	AgentPriority map[string]int `json:"agent_priority,omitempty"`
 }
 
 type telegramPRDSession struct {
@@ -999,11 +1002,28 @@ type telegramPRDCodexScoreResponse struct {
 	Summary      string   `json:"summary"`
 }
 
+type telegramPRDCodexStoryPriorityResponse struct {
+	Priority int    `json:"priority"`
+	Reason   string `json:"reason"`
+}
+
+type telegramPRDCodexRefineResponse struct {
+	Score          int      `json:"score"`
+	ReadyToApply   bool     `json:"ready_to_apply"`
+	Ask            string   `json:"ask"`
+	Missing        []string `json:"missing"`
+	SuggestedStage string   `json:"suggested_stage"`
+	Reason         string   `json:"reason"`
+}
+
 type telegramPRDSessionStore struct {
 	Sessions map[string]telegramPRDSession `json:"sessions"`
 }
 
 var telegramPRDSessionStoreMu sync.Mutex
+var telegramPRDCodexAssistAnalyzer = analyzeTelegramPRDInputWithCodex
+var telegramPRDStoryPriorityEstimator = estimateTelegramPRDStoryPriorityWithCodex
+var telegramPRDRefineAnalyzer = analyzeTelegramPRDRefineWithCodex
 
 func telegramPRDCommand(paths ralph.Paths, chatID int64, rawArgs string) (string, error) {
 	fields := strings.Fields(strings.TrimSpace(rawArgs))
@@ -1030,6 +1050,8 @@ func telegramPRDCommand(paths ralph.Paths, chatID int64, rawArgs string) (string
 		reply, err = telegramPRDApproveSession(paths, chatID)
 	case "preview", "status":
 		reply, err = telegramPRDPreviewSession(paths, chatID)
+	case "priority":
+		reply, err = telegramPRDPrioritySession(paths, chatID, arg)
 	case "save":
 		reply, err = telegramPRDSaveSession(paths, chatID, arg)
 	case "apply":
@@ -1062,27 +1084,33 @@ func telegramPRDHelp() string {
 		"- /prd score",
 		"- /prd approve",
 		"- /prd preview",
+		"- /prd priority [manager=900 planner=950 developer=1000 qa=1100|default]",
 		"- /prd save [file]",
 		"- /prd apply [file]",
 		"- /prd cancel",
 		"",
 		"Flow",
 		"1) /prd start",
-		"2) /prd refine (bot asks missing clarity context)",
-		"3) answer prompts, then add stories (title -> description -> role -> priority)",
-		"4) /prd score or /prd preview",
-		"5) /prd apply",
+		"2) /prd refine (Codex가 부족한 컨텍스트를 동적으로 질문)",
+		"3) (optional) /prd priority 로 에이전트별 기본 priority 조정",
+		"4) answer prompts, then add stories",
+		"   - 기본: title -> description -> role(선택: priority)",
+		"   - 빠른 입력: title | description | role [priority]",
+		"5) /prd score or /prd preview",
+		"6) /prd apply",
 	}, "\n")
 }
 
 func telegramPRDStartSession(paths ralph.Paths, chatID int64, productName string) (string, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	session := telegramPRDSession{
-		ChatID:          chatID,
-		Stage:           telegramPRDStageAwaitProduct,
-		ProductName:     "",
-		Stories:         []telegramPRDStory{},
-		Context:         telegramPRDContext{},
+		ChatID:      chatID,
+		Stage:       telegramPRDStageAwaitProduct,
+		ProductName: "",
+		Stories:     []telegramPRDStory{},
+		Context: telegramPRDContext{
+			AgentPriority: telegramPRDDefaultAgentPriorityMap(),
+		},
 		Approved:        false,
 		CreatedAtUTC:    now,
 		LastUpdatedAtUT: now,
@@ -1104,6 +1132,166 @@ func telegramPRDStartSession(paths ralph.Paths, chatID int64, productName string
 	return "PRD wizard started\n- next: 제품/프로젝트 이름을 입력하세요", nil
 }
 
+func telegramPRDDefaultPriorityForRole(role string) int {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "manager":
+		return 900
+	case "planner":
+		return 950
+	case "developer":
+		return 1000
+	case "qa":
+		return 1100
+	default:
+		return telegramPRDDefaultPriority
+	}
+}
+
+func telegramPRDDefaultAgentPriorityMap() map[string]int {
+	out := make(map[string]int, len(telegramPRDRoleOrder))
+	for _, role := range telegramPRDRoleOrder {
+		out[role] = telegramPRDDefaultPriorityForRole(role)
+	}
+	return out
+}
+
+func copyTelegramPRDAgentPriorityMap(src map[string]int) map[string]int {
+	if len(src) == 0 {
+		return map[string]int{}
+	}
+	out := make(map[string]int, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func normalizeTelegramPRDAgentPriorityMap(src map[string]int) map[string]int {
+	out := telegramPRDDefaultAgentPriorityMap()
+	for _, role := range telegramPRDRoleOrder {
+		if src == nil {
+			continue
+		}
+		if v := src[role]; v > 0 {
+			out[role] = v
+		}
+	}
+	return out
+}
+
+func formatTelegramPRDAgentPriorityInline(priorityMap map[string]int) string {
+	normalized := normalizeTelegramPRDAgentPriorityMap(priorityMap)
+	parts := make([]string, 0, len(telegramPRDRoleOrder))
+	for _, role := range telegramPRDRoleOrder {
+		parts = append(parts, fmt.Sprintf("%s=%d", role, normalized[role]))
+	}
+	return strings.Join(parts, " ")
+}
+
+func parseTelegramPRDAgentPriorityArgs(raw string) (map[string]int, error) {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return nil, fmt.Errorf("usage: /prd priority manager=900 planner=950 developer=1000 qa=1100")
+	}
+	text = strings.ReplaceAll(text, ",", " ")
+	fields := strings.Fields(text)
+	out := map[string]int{}
+	for _, field := range fields {
+		token := strings.TrimSpace(field)
+		if token == "" {
+			continue
+		}
+		sep := ""
+		if strings.Contains(token, "=") {
+			sep = "="
+		} else if strings.Contains(token, ":") {
+			sep = ":"
+		}
+		if sep == "" {
+			return nil, fmt.Errorf("invalid token: %q (expected role=priority)", token)
+		}
+		parts := strings.SplitN(token, sep, 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid token: %q", token)
+		}
+		role := strings.ToLower(strings.TrimSpace(parts[0]))
+		if !ralph.IsSupportedRole(role) {
+			return nil, fmt.Errorf("invalid role: %q", role)
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("invalid priority for %s: %q", role, parts[1])
+		}
+		out[role] = n
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("at least one role priority is required")
+	}
+	return out, nil
+}
+
+func telegramPRDPrioritySession(paths ralph.Paths, chatID int64, raw string) (string, error) {
+	session, found, err := telegramLoadPRDSession(paths, chatID)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "no active PRD session\n- run: /prd start", nil
+	}
+
+	current := normalizeTelegramPRDAgentPriorityMap(session.Context.AgentPriority)
+	arg := strings.TrimSpace(raw)
+	if arg == "" {
+		return strings.Join([]string{
+			"agent priority profile",
+			fmt.Sprintf("- current: %s", formatTelegramPRDAgentPriorityInline(current)),
+			"- update: /prd priority manager=900 planner=950 developer=1000 qa=1100",
+			"- reset: /prd priority default",
+		}, "\n"), nil
+	}
+
+	if strings.EqualFold(arg, "default") || strings.EqualFold(arg, "reset") {
+		session.Context.AgentPriority = telegramPRDDefaultAgentPriorityMap()
+		session.LastUpdatedAtUT = time.Now().UTC().Format(time.RFC3339)
+		if err := telegramUpsertPRDSession(paths, session); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("agent priorities reset\n- current: %s", formatTelegramPRDAgentPriorityInline(session.Context.AgentPriority)), nil
+	}
+
+	updates, err := parseTelegramPRDAgentPriorityArgs(arg)
+	if err != nil {
+		return "", err
+	}
+	merged := copyTelegramPRDAgentPriorityMap(current)
+	for role, priority := range updates {
+		merged[role] = priority
+	}
+	session.Context.AgentPriority = normalizeTelegramPRDAgentPriorityMap(merged)
+	session.LastUpdatedAtUT = time.Now().UTC().Format(time.RFC3339)
+	if err := telegramUpsertPRDSession(paths, session); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("agent priorities updated\n- current: %s", formatTelegramPRDAgentPriorityInline(session.Context.AgentPriority)), nil
+}
+
+func telegramPRDStoryPriorityForRole(session telegramPRDSession, role string) int {
+	role = strings.ToLower(strings.TrimSpace(role))
+	if v := session.Context.AgentPriority[role]; v > 0 {
+		return v
+	}
+	return telegramPRDDefaultPriorityForRole(role)
+}
+
+func resolveTelegramPRDStoryPriority(paths ralph.Paths, session telegramPRDSession, story telegramPRDStory) (int, string) {
+	fallback := telegramPRDStoryPriorityForRole(session, story.Role)
+	priority, source, err := telegramPRDStoryPriorityEstimator(paths, session, story)
+	if err != nil || priority <= 0 {
+		return fallback, "fallback_role_profile"
+	}
+	return priority, source
+}
+
 func telegramPRDRefineSession(paths ralph.Paths, chatID int64) (string, error) {
 	session, found, err := telegramLoadPRDSession(paths, chatID)
 	if err != nil {
@@ -1112,6 +1300,26 @@ func telegramPRDRefineSession(paths ralph.Paths, chatID int64) (string, error) {
 	if !found {
 		return "no active PRD session\n- run: /prd start", nil
 	}
+	session, codexRefine, usedCodexRefine, codexRefineErr := refreshTelegramPRDRefineWithCodex(paths, session)
+	if usedCodexRefine && codexRefineErr == nil {
+		if codexRefine.ReadyToApply {
+			session.Stage = telegramPRDStageAwaitStoryTitle
+		} else if stage, ok := normalizeTelegramPRDRefineSuggestedStage(codexRefine.SuggestedStage); ok {
+			session.Stage = stage
+		} else {
+			status := evaluateTelegramPRDClarity(session)
+			if status.NextStage != "" {
+				session.Stage = status.NextStage
+			}
+		}
+		session.Approved = false
+		session.LastUpdatedAtUT = time.Now().UTC().Format(time.RFC3339)
+		if err := telegramUpsertPRDSession(paths, session); err != nil {
+			return "", err
+		}
+		return formatTelegramPRDCodexRefineQuestion(codexRefine), nil
+	}
+
 	status := evaluateTelegramPRDClarity(session)
 	if status.ReadyToApply {
 		session.Stage = telegramPRDStageAwaitStoryTitle
@@ -1129,7 +1337,11 @@ func telegramPRDRefineSession(paths ralph.Paths, chatID int64) (string, error) {
 			return "", err
 		}
 	}
-	return formatTelegramPRDClarityQuestion(status), nil
+	reply := formatTelegramPRDClarityQuestion(status)
+	if codexRefineErr != nil {
+		reply += "\n- note: codex refine unavailable, fallback heuristic used"
+	}
+	return reply, nil
 }
 
 func telegramPRDScoreSession(paths ralph.Paths, chatID int64) (string, error) {
@@ -1230,6 +1442,7 @@ func telegramPRDPreviewSession(paths ralph.Paths, chatID int64) (string, error) 
 	if strings.TrimSpace(session.Context.Constraints) != "" {
 		fmt.Fprintf(&b, "- constraints: %s\n", compactSingleLine(session.Context.Constraints, 120))
 	}
+	fmt.Fprintf(&b, "- agent_priorities: %s\n", formatTelegramPRDAgentPriorityInline(session.Context.AgentPriority))
 	if len(session.Context.Assumptions) > 0 {
 		fmt.Fprintf(&b, "- assumptions: %d\n", len(session.Context.Assumptions))
 	}
@@ -1392,7 +1605,7 @@ func telegramPRDHandleInput(paths ralph.Paths, chatID int64, input string) (stri
 		input = assist.InputOverride
 	}
 
-	updated, reply, err := advanceTelegramPRDSession(session, input)
+	updated, reply, err := advanceTelegramPRDSession(paths, session, input)
 	if err != nil {
 		return "", err
 	}
@@ -1404,7 +1617,7 @@ func telegramPRDHandleInput(paths ralph.Paths, chatID int64, input string) (stri
 	return reply, nil
 }
 
-func advanceTelegramPRDSession(session telegramPRDSession, input string) (telegramPRDSession, string, error) {
+func advanceTelegramPRDSession(paths ralph.Paths, session telegramPRDSession, input string) (telegramPRDSession, string, error) {
 	session.LastUpdatedAtUT = time.Now().UTC().Format(time.RFC3339)
 	session.Approved = false
 	input = strings.TrimSpace(input)
@@ -1423,108 +1636,76 @@ func advanceTelegramPRDSession(session telegramPRDSession, input string) (telegr
 		return session, fmt.Sprintf("product set: %s\n- next: /prd refine", session.ProductName), nil
 
 	case telegramPRDStageAwaitProblem:
-		if help, handled := explainTelegramPRDContextStageIfQuestion(session.Stage, input); handled {
-			return session, help, nil
-		}
 		session.Context.Problem = normalizeTelegramPRDContextAnswer(input, "현재 기능/운영상 pain point는 명시되지 않음")
 		recordTelegramPRDAssumption(&session.Context, "problem", session.Context.Problem)
-		return advanceTelegramPRDRefineFlow(session)
+		return advanceTelegramPRDRefineFlow(paths, session)
 
 	case telegramPRDStageAwaitGoal:
-		if help, handled := explainTelegramPRDContextStageIfQuestion(session.Stage, input); handled {
-			return session, help, nil
-		}
 		session.Context.Goal = normalizeTelegramPRDContextAnswer(input, "단기 목표는 첫 동작 가능한 자동화 루프 확보")
 		recordTelegramPRDAssumption(&session.Context, "goal", session.Context.Goal)
-		return advanceTelegramPRDRefineFlow(session)
+		return advanceTelegramPRDRefineFlow(paths, session)
 
 	case telegramPRDStageAwaitInScope:
-		if help, handled := explainTelegramPRDContextStageIfQuestion(session.Stage, input); handled {
-			return session, help, nil
-		}
 		session.Context.InScope = normalizeTelegramPRDContextAnswer(input, "초기 릴리즈에서는 핵심 사용자 흐름만 포함")
 		recordTelegramPRDAssumption(&session.Context, "in_scope", session.Context.InScope)
-		return advanceTelegramPRDRefineFlow(session)
+		return advanceTelegramPRDRefineFlow(paths, session)
 
 	case telegramPRDStageAwaitOutOfScope:
-		if help, handled := explainTelegramPRDContextStageIfQuestion(session.Stage, input); handled {
-			return session, help, nil
-		}
 		session.Context.OutOfScope = normalizeTelegramPRDContextAnswer(input, "대규모 리팩터/새 인프라 구축은 제외")
 		recordTelegramPRDAssumption(&session.Context, "out_of_scope", session.Context.OutOfScope)
-		return advanceTelegramPRDRefineFlow(session)
+		return advanceTelegramPRDRefineFlow(paths, session)
 
 	case telegramPRDStageAwaitAcceptance:
-		if help, handled := explainTelegramPRDContextStageIfQuestion(session.Stage, input); handled {
-			return session, help, nil
-		}
 		session.Context.Acceptance = normalizeTelegramPRDContextAnswer(input, "주요 시나리오 성공 + 실패 시 복구 경로 확인")
 		recordTelegramPRDAssumption(&session.Context, "acceptance", session.Context.Acceptance)
-		return advanceTelegramPRDRefineFlow(session)
+		return advanceTelegramPRDRefineFlow(paths, session)
 
 	case telegramPRDStageAwaitConstraints:
-		if help, handled := explainTelegramPRDContextStageIfQuestion(session.Stage, input); handled {
-			return session, help, nil
-		}
 		session.Context.Constraints = normalizeTelegramPRDContextAnswer(input, "시간/리소스 제약은 일반적인 단일 개발자 환경 가정")
 		recordTelegramPRDAssumption(&session.Context, "constraints", session.Context.Constraints)
-		return advanceTelegramPRDRefineFlow(session)
+		return advanceTelegramPRDRefineFlow(paths, session)
 
 	case telegramPRDStageAwaitStoryTitle:
+		if story, quick, err := parseTelegramPRDQuickStoryInput(session, input); err != nil {
+			if quick {
+				return session, "", err
+			}
+		} else if quick {
+			updated, reply, err := telegramPRDAppendStoryFromQuick(paths, session, story)
+			return updated, reply, err
+		}
 		session.DraftTitle = input
 		session.Stage = telegramPRDStageAwaitStoryDesc
-		return session, "story title saved\n- next: 설명을 입력하세요", nil
+		return session, "story title saved\n- next: 설명을 입력하세요 (quick: 제목 | 설명 | role [priority])", nil
 
 	case telegramPRDStageAwaitStoryDesc:
 		session.DraftDesc = input
 		session.Stage = telegramPRDStageAwaitStoryRole
-		return session, "story description saved\n- next: role 입력 (manager|planner|developer|qa)", nil
+		return session, "story description saved\n- next: role 입력 (manager|planner|developer|qa, optional: role priority)", nil
 
 	case telegramPRDStageAwaitStoryRole:
-		role, err := parseTelegramPRDStoryRole(input)
+		role, priority, explicitPriority, err := parseTelegramPRDStoryRoleAndPriorityInput(session, input, "")
 		if err != nil {
 			return session, "", err
 		}
-		session.DraftRole = role
-		session.Stage = telegramPRDStageAwaitStoryPrio
-		return session, fmt.Sprintf("role saved: %s\n- next: priority 입력 (숫자, 기본값=%d)", role, telegramPRDDefaultPriority), nil
+		updated, story, source, err := telegramPRDAppendStoryFromDraft(paths, session, role, priority, explicitPriority)
+		if err != nil {
+			return session, "", err
+		}
+		return updated, telegramPRDStoryAddedReply(updated, story, source), nil
 
 	case telegramPRDStageAwaitStoryPrio:
 		priority, err := parseTelegramPRDStoryPriority(input)
 		if err != nil {
 			return session, "", err
 		}
-		idx := len(session.Stories) + 1
-		story := telegramPRDStory{
-			ID:          telegramPRDStoryID(session, idx),
-			Title:       strings.TrimSpace(session.DraftTitle),
-			Description: strings.TrimSpace(session.DraftDesc),
-			Role:        strings.TrimSpace(session.DraftRole),
-			Priority:    priority,
+		rawPriority := strings.TrimSpace(strings.ToLower(input))
+		explicitPriority := !(rawPriority == "" || rawPriority == "default" || rawPriority == "skip")
+		updated, story, source, err := telegramPRDAppendStoryFromDraft(paths, session, strings.TrimSpace(session.DraftRole), priority, explicitPriority)
+		if err != nil {
+			return session, "", err
 		}
-		if strings.TrimSpace(story.Title) == "" || strings.TrimSpace(story.Description) == "" || strings.TrimSpace(story.Role) == "" {
-			return session, "", fmt.Errorf("incomplete story draft; run /prd cancel then /prd start")
-		}
-		session.Stories = append(session.Stories, story)
-		session.DraftTitle = ""
-		session.DraftDesc = ""
-		session.DraftRole = ""
-		session.Stage = telegramPRDStageAwaitStoryTitle
-		clarity := evaluateTelegramPRDClarity(session)
-		next := "다음 story 제목 입력 또는 /prd preview /prd save /prd apply"
-		if !clarity.ReadyToApply {
-			next = "/prd refine (부족 컨텍스트 질문 진행) 또는 다음 story 제목 입력"
-		}
-		return session, fmt.Sprintf(
-			"story added\n- id: %s\n- title: %s\n- role: %s\n- priority: %d\n- stories_total: %d\n- clarity_score: %d/100\n- next: %s",
-			story.ID,
-			compactSingleLine(story.Title, 90),
-			story.Role,
-			story.Priority,
-			len(session.Stories),
-			clarity.Score,
-			next,
-		), nil
+		return updated, telegramPRDStoryAddedReply(updated, story, source), nil
 
 	default:
 		status := evaluateTelegramPRDClarity(session)
@@ -1536,7 +1717,23 @@ func advanceTelegramPRDSession(session telegramPRDSession, input string) (telegr
 	}
 }
 
-func advanceTelegramPRDRefineFlow(session telegramPRDSession) (telegramPRDSession, string, error) {
+func advanceTelegramPRDRefineFlow(paths ralph.Paths, session telegramPRDSession) (telegramPRDSession, string, error) {
+	sessionForCodex, codexRefine, usedCodexRefine, codexRefineErr := refreshTelegramPRDRefineWithCodex(paths, session)
+	if usedCodexRefine && codexRefineErr == nil {
+		session = sessionForCodex
+		if codexRefine.ReadyToApply {
+			session.Stage = telegramPRDStageAwaitStoryTitle
+			return session, formatTelegramPRDCodexRefineQuestion(codexRefine), nil
+		}
+		if stage, ok := normalizeTelegramPRDRefineSuggestedStage(codexRefine.SuggestedStage); ok {
+			session.Stage = stage
+		}
+		if strings.TrimSpace(session.Stage) == "" {
+			session.Stage = telegramPRDStageAwaitStoryTitle
+		}
+		return session, formatTelegramPRDCodexRefineQuestion(codexRefine), nil
+	}
+
 	status := evaluateTelegramPRDClarity(session)
 	if status.ReadyToApply {
 		session.Stage = telegramPRDStageAwaitStoryTitle
@@ -1549,29 +1746,22 @@ func advanceTelegramPRDRefineFlow(session telegramPRDSession) (telegramPRDSessio
 	if session.Stage == "" {
 		session.Stage = telegramPRDStageAwaitStoryTitle
 	}
-	return session, formatTelegramPRDClarityQuestion(status), nil
+	reply := formatTelegramPRDClarityQuestion(status)
+	if codexRefineErr != nil {
+		reply += "\n- note: codex refine unavailable, fallback heuristic used"
+	}
+	return session, reply, nil
 }
 
 func telegramPRDAssistInput(paths ralph.Paths, session telegramPRDSession, input string) (telegramPRDInputAssistResult, error) {
 	input = strings.TrimSpace(input)
-	if input == "" || !isTelegramPRDContextStage(session.Stage) {
+	if input == "" {
 		return telegramPRDInputAssistResult{}, nil
 	}
 
-	// Fast-path local handling to reduce codex round trips and keep stage stable for obvious questions.
-	if isLikelyTelegramPRDRecommendationRequest(input) {
-		reply := recommendTelegramPRDContextStage(session)
-		if strings.TrimSpace(reply) != "" {
-			return telegramPRDInputAssistResult{Handled: true, Reply: reply}, nil
-		}
-	}
-	if help, handled := explainTelegramPRDContextStageIfQuestion(session.Stage, input); handled {
-		return telegramPRDInputAssistResult{Handled: true, Reply: help}, nil
-	}
-
-	assist, err := analyzeTelegramPRDInputWithCodex(paths, session, input)
+	assist, err := telegramPRDCodexAssistAnalyzer(paths, session, input)
 	if err != nil {
-		return telegramPRDFallbackAssist(session, input), err
+		return telegramPRDInputAssistResult{}, err
 	}
 
 	intent := strings.ToLower(strings.TrimSpace(assist.Intent))
@@ -1584,24 +1774,10 @@ func telegramPRDAssistInput(paths ralph.Paths, session telegramPRDSession, input
 			}, nil
 		}
 		return telegramPRDInputAssistResult{}, nil
-	case "clarify":
+	case "clarify", "recommend":
 		reply := strings.TrimSpace(assist.Reply)
 		if reply == "" {
-			if fallback, handled := explainTelegramPRDContextStageIfQuestion(session.Stage, input); handled {
-				reply = fallback
-			}
-		}
-		if strings.TrimSpace(reply) == "" {
-			return telegramPRDInputAssistResult{}, nil
-		}
-		return telegramPRDInputAssistResult{
-			Handled: true,
-			Reply:   reply,
-		}, nil
-	case "recommend":
-		reply := strings.TrimSpace(assist.Reply)
-		if reply == "" {
-			reply = recommendTelegramPRDContextStage(session)
+			reply = telegramPRDStageAssistFallback(session.Stage)
 		}
 		if strings.TrimSpace(reply) == "" {
 			return telegramPRDInputAssistResult{}, nil
@@ -1611,110 +1787,7 @@ func telegramPRDAssistInput(paths ralph.Paths, session telegramPRDSession, input
 			Reply:   reply,
 		}, nil
 	default:
-		return telegramPRDFallbackAssist(session, input), nil
-	}
-}
-
-func telegramPRDFallbackAssist(session telegramPRDSession, input string) telegramPRDInputAssistResult {
-	if isLikelyTelegramPRDRecommendationRequest(input) {
-		reply := recommendTelegramPRDContextStage(session)
-		if strings.TrimSpace(reply) != "" {
-			return telegramPRDInputAssistResult{Handled: true, Reply: reply}
-		}
-	}
-	if help, handled := explainTelegramPRDContextStageIfQuestion(session.Stage, input); handled {
-		return telegramPRDInputAssistResult{Handled: true, Reply: help}
-	}
-	return telegramPRDInputAssistResult{}
-}
-
-func isTelegramPRDContextStage(stage string) bool {
-	switch stage {
-	case telegramPRDStageAwaitProblem,
-		telegramPRDStageAwaitGoal,
-		telegramPRDStageAwaitInScope,
-		telegramPRDStageAwaitOutOfScope,
-		telegramPRDStageAwaitAcceptance,
-		telegramPRDStageAwaitConstraints:
-		return true
-	default:
-		return false
-	}
-}
-
-func isLikelyTelegramPRDRecommendationRequest(input string) bool {
-	v := strings.TrimSpace(strings.ToLower(input))
-	if v == "" {
-		return false
-	}
-	keywords := []string{
-		"추천", "제안", "가이드", "샘플", "예시", "좋을까", "어떻게 하면",
-		"recommend", "suggest", "proposal", "template", "best practice",
-	}
-	for _, k := range keywords {
-		if strings.Contains(v, k) {
-			return true
-		}
-	}
-	return false
-}
-
-func recommendTelegramPRDContextStage(session telegramPRDSession) string {
-	product := strings.TrimSpace(session.ProductName)
-	if product == "" {
-		product = "현재 프로젝트"
-	}
-	switch session.Stage {
-	case telegramPRDStageAwaitProblem:
-		return strings.Join([]string{
-			"problem 추천",
-			fmt.Sprintf("- %s에서 반복 실패/중단으로 운영자가 수동 복구를 반복함", product),
-			"- 실패 원인/상태 가시성이 낮아 대응 시간이 길어짐",
-			"- 루프는 돌지만 실제 산출물 전환율이 낮아 생산성이 떨어짐",
-			"- 위 중 가장 맞는 문장 1개를 보내거나, 직접 수정해서 보내세요",
-		}, "\n")
-	case telegramPRDStageAwaitGoal:
-		return strings.Join([]string{
-			"goal 추천",
-			"- 24시간 무중단 운영 가능 상태 달성",
-			"- 장애 감지 후 자동 복구 시간 5분 이내",
-			"- PRD 입력부터 이슈 생성까지 텔레그램만으로 완료",
-			"- 가장 가까운 목표 1개를 선택해 보내세요",
-		}, "\n")
-	case telegramPRDStageAwaitInScope:
-		return strings.Join([]string{
-			"in-scope 추천",
-			"- watchdog/timeout/retry 튜닝 및 실패 시 강제 fail 처리",
-			"- 텔레그램 PRD wizard 대화형 질문/추천 UX 개선",
-			"- reload/daemon 재시작 자동화와 상태 가시성 강화",
-			"- 이번 사이클에 반드시 할 항목만 1~3개 보내세요",
-		}, "\n")
-	case telegramPRDStageAwaitOutOfScope:
-		return strings.Join([]string{
-			"out-of-scope 추천",
-			"- 신규 인프라 도입(클러스터, 큐 시스템) 제외",
-			"- 전면 UI/대시보드 재설계 제외",
-			"- 무관한 리팩터링/성능 최적화 제외",
-			"- 이번 사이클에서 안 할 항목을 1~3개 보내세요",
-		}, "\n")
-	case telegramPRDStageAwaitAcceptance:
-		return strings.Join([]string{
-			"acceptance 추천",
-			"- 텔레그램으로 /prd start -> /prd apply 흐름이 중단 없이 완료",
-			"- 질문형 입력 시 단계가 유지되고 설명/추천 응답이 제공됨",
-			"- 적용 후 issue queue에 user story가 정상 생성됨",
-			"- 검증 가능한 기준을 2~3개로 정리해 보내세요",
-		}, "\n")
-	case telegramPRDStageAwaitConstraints:
-		return strings.Join([]string{
-			"constraints 추천",
-			"- 단일 홈서버/원격 SSH 환경에서 동작해야 함",
-			"- 무중단 운영(터미널 종료 영향 없음) 필수",
-			"- 외부 네트워크 이슈가 있어도 자동 복구 우선",
-			"- 제약이 없으면 `skip` 입력",
-		}, "\n")
-	default:
-		return ""
+		return telegramPRDInputAssistResult{}, nil
 	}
 }
 
@@ -1778,6 +1851,132 @@ func analyzeTelegramPRDInputWithCodex(paths ralph.Paths, session telegramPRDSess
 		return telegramPRDCodexAssistResponse{}, err
 	}
 	return parsed, nil
+}
+
+func estimateTelegramPRDStoryPriorityWithCodex(paths ralph.Paths, session telegramPRDSession, story telegramPRDStory) (int, string, error) {
+	if _, err := exec.LookPath("codex"); err != nil {
+		return 0, "", fmt.Errorf("codex command not found")
+	}
+	profile, err := ralph.LoadProfile(paths)
+	if err != nil {
+		return 0, "", err
+	}
+	if !profile.RequireCodex {
+		return 0, "", fmt.Errorf("codex priority disabled (require_codex=false)")
+	}
+	timeoutSec := profile.CodexExecTimeoutSec
+	if timeoutSec <= 0 || timeoutSec > 120 {
+		timeoutSec = telegramPRDCodexAssistTimeoutSec
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+	defer cancel()
+
+	tmpDir, err := os.MkdirTemp("", "ralph-telegram-prd-priority-*")
+	if err != nil {
+		return 0, "", err
+	}
+	defer os.RemoveAll(tmpDir)
+	outPath := filepath.Join(tmpDir, "assistant-last-message.txt")
+
+	model := strings.TrimSpace(profile.CodexModelForRole("planner"))
+	args := []string{
+		"--ask-for-approval", profile.CodexApproval,
+		"exec",
+		"--sandbox", profile.CodexSandbox,
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	args = append(args,
+		"--cd", paths.ProjectDir,
+		"--skip-git-repo-check",
+		"--output-last-message", outPath,
+		"-",
+	)
+
+	conversationTail := readTelegramPRDConversationTail(paths, session.ChatID, 5000)
+	prompt := buildTelegramPRDStoryPriorityPrompt(session, story, conversationTail)
+	cmd := exec.CommandContext(ctx, "codex", args...)
+	cmd.Stdin = strings.NewReader(prompt)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		return 0, "", err
+	}
+
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		return 0, "", fmt.Errorf("read codex priority output: %w", err)
+	}
+	parsed, err := parseTelegramPRDCodexStoryPriorityResponse(string(raw))
+	if err != nil {
+		return 0, "", err
+	}
+	priority := parsed.Priority
+	if priority <= 0 {
+		return 0, "", fmt.Errorf("invalid codex priority: %d", parsed.Priority)
+	}
+	return priority, "codex_auto", nil
+}
+
+func buildTelegramPRDStoryPriorityPrompt(session telegramPRDSession, story telegramPRDStory, conversationTail string) string {
+	payload, _ := json.MarshalIndent(session, "", "  ")
+	storyPayload, _ := json.MarshalIndent(story, "", "  ")
+	var b strings.Builder
+	fmt.Fprintln(&b, "You are a strict issue priority allocator for autonomous agent execution.")
+	fmt.Fprintln(&b, "Return STRICT JSON only.")
+	fmt.Fprintln(&b, `Schema: {"priority":1000,"reason":"..."}`)
+	fmt.Fprintln(&b, "Rules:")
+	fmt.Fprintln(&b, "- Lower number means higher priority.")
+	fmt.Fprintln(&b, "- Use integer range 100..3000.")
+	fmt.Fprintln(&b, "- Consider role urgency, business risk, operational impact, and PRD context.")
+	fmt.Fprintln(&b, "- Keep reason concise in Korean.")
+	fmt.Fprintln(&b, "\nPRD Session JSON:")
+	fmt.Fprintln(&b, string(payload))
+	fmt.Fprintln(&b, "\nCandidate Story JSON:")
+	fmt.Fprintln(&b, string(storyPayload))
+	if strings.TrimSpace(conversationTail) != "" {
+		fmt.Fprintln(&b, "\nRecent Conversation (Markdown):")
+		fmt.Fprintln(&b, conversationTail)
+	}
+	return b.String()
+}
+
+func parseTelegramPRDCodexStoryPriorityResponse(raw string) (telegramPRDCodexStoryPriorityResponse, error) {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return telegramPRDCodexStoryPriorityResponse{}, fmt.Errorf("empty codex priority response")
+	}
+	if strings.HasPrefix(text, "```") {
+		text = strings.TrimPrefix(text, "```json")
+		text = strings.TrimPrefix(text, "```")
+		text = strings.TrimSuffix(text, "```")
+		text = strings.TrimSpace(text)
+	}
+	var parsed telegramPRDCodexStoryPriorityResponse
+	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
+		start := strings.Index(text, "{")
+		end := strings.LastIndex(text, "}")
+		if start < 0 || end <= start {
+			return telegramPRDCodexStoryPriorityResponse{}, fmt.Errorf("invalid codex priority json")
+		}
+		if unmarshalErr := json.Unmarshal([]byte(text[start:end+1]), &parsed); unmarshalErr != nil {
+			return telegramPRDCodexStoryPriorityResponse{}, fmt.Errorf("parse codex priority json: %w", unmarshalErr)
+		}
+	}
+	parsed.Priority = clampTelegramPRDStoryPriority(parsed.Priority)
+	parsed.Reason = compactSingleLine(strings.TrimSpace(parsed.Reason), 160)
+	return parsed, nil
+}
+
+func clampTelegramPRDStoryPriority(v int) int {
+	if v < 100 {
+		return 100
+	}
+	if v > 3000 {
+		return 3000
+	}
+	return v
 }
 
 func analyzeTelegramPRDScoreWithCodex(paths ralph.Paths, session telegramPRDSession) (telegramPRDCodexScoreResponse, error) {
@@ -1848,6 +2047,149 @@ func refreshTelegramPRDScoreWithCodex(paths ralph.Paths, session telegramPRDSess
 	session.CodexSummary = strings.TrimSpace(score.Summary)
 	session.CodexScoredAtUT = time.Now().UTC().Format(time.RFC3339)
 	return session, true, nil
+}
+
+func refreshTelegramPRDRefineWithCodex(paths ralph.Paths, session telegramPRDSession) (telegramPRDSession, telegramPRDCodexRefineResponse, bool, error) {
+	refine, err := telegramPRDRefineAnalyzer(paths, session)
+	if err != nil {
+		return session, telegramPRDCodexRefineResponse{}, false, err
+	}
+	session.CodexScore = clampTelegramPRDScore(refine.Score)
+	session.CodexReady = refine.ReadyToApply && session.CodexScore >= telegramPRDClarityMinScore
+	session.CodexMissing = sanitizeTelegramPRDMissingList(refine.Missing)
+	session.CodexSummary = compactSingleLine(strings.TrimSpace(refine.Reason), 200)
+	session.CodexScoredAtUT = time.Now().UTC().Format(time.RFC3339)
+	refine.Score = session.CodexScore
+	refine.ReadyToApply = session.CodexReady
+	refine.Missing = append([]string(nil), session.CodexMissing...)
+	return session, refine, true, nil
+}
+
+func analyzeTelegramPRDRefineWithCodex(paths ralph.Paths, session telegramPRDSession) (telegramPRDCodexRefineResponse, error) {
+	if _, err := exec.LookPath("codex"); err != nil {
+		return telegramPRDCodexRefineResponse{}, fmt.Errorf("codex command not found")
+	}
+	profile, err := ralph.LoadProfile(paths)
+	if err != nil {
+		return telegramPRDCodexRefineResponse{}, err
+	}
+	if !profile.RequireCodex {
+		return telegramPRDCodexRefineResponse{}, fmt.Errorf("codex refine disabled (require_codex=false)")
+	}
+	timeoutSec := profile.CodexExecTimeoutSec
+	if timeoutSec <= 0 || timeoutSec > 120 {
+		timeoutSec = telegramPRDCodexAssistTimeoutSec
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+	defer cancel()
+
+	tmpDir, err := os.MkdirTemp("", "ralph-telegram-prd-refine-*")
+	if err != nil {
+		return telegramPRDCodexRefineResponse{}, err
+	}
+	defer os.RemoveAll(tmpDir)
+	outPath := filepath.Join(tmpDir, "assistant-last-message.txt")
+
+	model := strings.TrimSpace(profile.CodexModelForRole("planner"))
+	args := []string{
+		"--ask-for-approval", profile.CodexApproval,
+		"exec",
+		"--sandbox", profile.CodexSandbox,
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	args = append(args,
+		"--cd", paths.ProjectDir,
+		"--skip-git-repo-check",
+		"--output-last-message", outPath,
+		"-",
+	)
+
+	conversationTail := readTelegramPRDConversationTail(paths, session.ChatID, 8000)
+	prompt := buildTelegramPRDRefinePrompt(session, conversationTail)
+	cmd := exec.CommandContext(ctx, "codex", args...)
+	cmd.Stdin = strings.NewReader(prompt)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		return telegramPRDCodexRefineResponse{}, err
+	}
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		return telegramPRDCodexRefineResponse{}, fmt.Errorf("read codex refine output: %w", err)
+	}
+	return parseTelegramPRDCodexRefineResponse(string(raw))
+}
+
+func buildTelegramPRDRefinePrompt(session telegramPRDSession, conversationTail string) string {
+	payload, _ := json.MarshalIndent(session, "", "  ")
+	var b strings.Builder
+	fmt.Fprintln(&b, "You are a PRD refinement orchestrator for autonomous agent execution.")
+	fmt.Fprintln(&b, "Return STRICT JSON only.")
+	fmt.Fprintln(&b, `Schema: {"score":0,"ready_to_apply":false,"ask":"...","missing":["..."],"suggested_stage":"await_problem","reason":"..."}`)
+	fmt.Fprintln(&b, "Rules:")
+	fmt.Fprintln(&b, "- score must be 0..100 and reflect execution readiness.")
+	fmt.Fprintf(&b, "- ready_to_apply=true only when score>=%d and critical context is sufficient.\n", telegramPRDClarityMinScore)
+	fmt.Fprintln(&b, "- ask must be ONE concrete next question in Korean (not a list).")
+	fmt.Fprintln(&b, "- missing should include top missing/weak items.")
+	fmt.Fprintln(&b, "- suggested_stage should be one of:")
+	fmt.Fprintln(&b, "  await_product, await_problem, await_goal, await_in_scope, await_out_of_scope, await_acceptance, await_constraints, await_story_title")
+	fmt.Fprintln(&b, "- reason should summarize why this question is the highest leverage next step.")
+	fmt.Fprintln(&b, "\nCurrent session JSON:")
+	fmt.Fprintln(&b, string(payload))
+	if strings.TrimSpace(conversationTail) != "" {
+		fmt.Fprintln(&b, "\nRecent conversation (markdown):")
+		fmt.Fprintln(&b, conversationTail)
+	}
+	return b.String()
+}
+
+func parseTelegramPRDCodexRefineResponse(raw string) (telegramPRDCodexRefineResponse, error) {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return telegramPRDCodexRefineResponse{}, fmt.Errorf("empty codex refine response")
+	}
+	if strings.HasPrefix(text, "```") {
+		text = strings.TrimPrefix(text, "```json")
+		text = strings.TrimPrefix(text, "```")
+		text = strings.TrimSuffix(text, "```")
+		text = strings.TrimSpace(text)
+	}
+	var parsed telegramPRDCodexRefineResponse
+	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
+		start := strings.Index(text, "{")
+		end := strings.LastIndex(text, "}")
+		if start < 0 || end <= start {
+			return telegramPRDCodexRefineResponse{}, fmt.Errorf("invalid codex refine json")
+		}
+		if unmarshalErr := json.Unmarshal([]byte(text[start:end+1]), &parsed); unmarshalErr != nil {
+			return telegramPRDCodexRefineResponse{}, fmt.Errorf("parse codex refine json: %w", unmarshalErr)
+		}
+	}
+	parsed.Score = clampTelegramPRDScore(parsed.Score)
+	parsed.Ask = compactSingleLine(strings.TrimSpace(parsed.Ask), 240)
+	parsed.Missing = sanitizeTelegramPRDMissingList(parsed.Missing)
+	parsed.SuggestedStage = strings.TrimSpace(parsed.SuggestedStage)
+	parsed.Reason = compactSingleLine(strings.TrimSpace(parsed.Reason), 200)
+	return parsed, nil
+}
+
+func normalizeTelegramPRDRefineSuggestedStage(raw string) (string, bool) {
+	stage := strings.ToLower(strings.TrimSpace(raw))
+	switch stage {
+	case telegramPRDStageAwaitProduct,
+		telegramPRDStageAwaitProblem,
+		telegramPRDStageAwaitGoal,
+		telegramPRDStageAwaitInScope,
+		telegramPRDStageAwaitOutOfScope,
+		telegramPRDStageAwaitAcceptance,
+		telegramPRDStageAwaitConstraints,
+		telegramPRDStageAwaitStoryTitle:
+		return stage, true
+	default:
+		return "", false
+	}
 }
 
 func buildTelegramPRDScorePrompt(session telegramPRDSession, conversationTail string) string {
@@ -1937,15 +2279,28 @@ func buildTelegramPRDAssistPrompt(session telegramPRDSession, userInput, convers
 	fmt.Fprintln(&b, "Classify the user input intent and return STRICT JSON only.")
 	fmt.Fprintln(&b, "No markdown, no prose outside JSON.")
 	fmt.Fprintln(&b, `Schema: {"intent":"answer|clarify|recommend","reply":"string","normalized_answer":"string"}`)
-	fmt.Fprintln(&b, "Rules:")
-	fmt.Fprintln(&b, "- intent=clarify when user asks what this field means.")
-	fmt.Fprintln(&b, "- intent=recommend when user asks for examples/recommendation/proposal.")
-	fmt.Fprintln(&b, "- intent=answer when user already provides usable field value.")
-	fmt.Fprintln(&b, "- Keep reply in Korean, concise, practical.")
-	fmt.Fprintln(&b, "- If intent=answer, put cleaned value into normalized_answer and keep reply empty.")
+	fmt.Fprintln(&b, "Critical rules:")
+	fmt.Fprintln(&b, "- Use intent=answer only when the user clearly provided a usable field value for the current stage.")
+	fmt.Fprintln(&b, "- If the user asks for suggestion/example/template/explanation or says prior save is wrong, NEVER use answer.")
+	fmt.Fprintln(&b, "- Use intent=clarify for 'what does this mean/how to fill this field' type inputs.")
+	fmt.Fprintln(&b, "- Use intent=recommend for 'recommend/propose/show examples' type inputs.")
+	fmt.Fprintln(&b, "- Keep reply in Korean, concise, and actionable.")
+	fmt.Fprintln(&b, "- If intent=answer, set normalized_answer to a cleaned value and leave reply empty.")
+	fmt.Fprintln(&b, "- If intent!=answer, leave normalized_answer empty.")
+	fmt.Fprintln(&b, "- For role stage, normalized_answer must be one of: manager|planner|developer|qa.")
+	fmt.Fprintln(&b, "- For role stage, role + explicit priority is allowed (e.g. developer 900).")
+	fmt.Fprintln(&b, "- For priority stage, normalized_answer must be a positive integer or 'default'.")
 	fmt.Fprintf(&b, "\nCurrent stage: %s\n", session.Stage)
 	fmt.Fprintf(&b, "Stage prompt: %s\n", telegramPRDStagePrompt(session.Stage))
+	fmt.Fprintf(&b, "Expected answer format: %s\n", telegramPRDStageAnswerFormat(session.Stage))
 	fmt.Fprintf(&b, "Product: %s\n", valueOrDash(strings.TrimSpace(session.ProductName)))
+	fmt.Fprintf(&b, "Agent default priorities: %s\n", formatTelegramPRDAgentPriorityInline(session.Context.AgentPriority))
+	if strings.TrimSpace(session.DraftTitle) != "" {
+		fmt.Fprintf(&b, "Current draft title: %s\n", session.DraftTitle)
+	}
+	if strings.TrimSpace(session.DraftDesc) != "" {
+		fmt.Fprintf(&b, "Current draft description: %s\n", session.DraftDesc)
+	}
 	fmt.Fprintf(&b, "Current clarity score: %d/100\n", status.Score)
 	if strings.TrimSpace(conversationTail) != "" {
 		fmt.Fprintln(&b, "Recent conversation (markdown):")
@@ -1998,78 +2353,6 @@ func normalizeTelegramPRDContextAnswer(input, defaultAssumption string) string {
 		return fmt.Sprintf("%s %s", telegramPRDAssumedPrefix, strings.TrimSpace(defaultAssumption))
 	}
 	return v
-}
-
-func explainTelegramPRDContextStageIfQuestion(stage, input string) (string, bool) {
-	if !isLikelyTelegramPRDQuestion(input) {
-		return "", false
-	}
-	switch stage {
-	case telegramPRDStageAwaitProblem:
-		return strings.Join([]string{
-			"problem 설명",
-			"- 의미: 지금 사용자가 겪는 핵심 문제",
-			"- 예시: Codex 네트워크 이슈로 루프가 자주 멈추고 수동 복구가 반복됨",
-			"- 지금 답변: 현재 문제를 한 줄로 입력",
-		}, "\n"), true
-	case telegramPRDStageAwaitGoal:
-		return strings.Join([]string{
-			"goal 설명",
-			"- 의미: 이번 사이클이 끝났을 때 달성할 결과",
-			"- 예시: 루프 중단 없이 24시간 운영 가능",
-			"- 지금 답변: 목표를 한 줄로 입력",
-		}, "\n"), true
-	case telegramPRDStageAwaitInScope:
-		return strings.Join([]string{
-			"in-scope 설명",
-			"- 의미: 이번 사이클에서 반드시 구현/검증할 것",
-			"- 예시: watchdog 개선, timeout 강제 실패, 재시도/백오프",
-			"- 지금 답변: 반드시 할 항목을 입력",
-		}, "\n"), true
-	case telegramPRDStageAwaitOutOfScope:
-		return strings.Join([]string{
-			"out-of-scope 설명",
-			"- 의미: 이번 사이클에서 의도적으로 하지 않을 것",
-			"- 예시: 대규모 아키텍처 재설계, 신규 인프라 도입",
-			"- 지금 답변: 제외할 항목을 입력",
-		}, "\n"), true
-	case telegramPRDStageAwaitAcceptance:
-		return strings.Join([]string{
-			"acceptance 설명",
-			"- 의미: 완료로 인정할 수 있는 검증 기준",
-			"- 예시: 재시도 3회 후 실패 기록, 데몬 자동 재시작 확인",
-			"- 지금 답변: 검증 가능한 기준을 입력",
-		}, "\n"), true
-	case telegramPRDStageAwaitConstraints:
-		return strings.Join([]string{
-			"constraints 설명",
-			"- 의미: 일정/리소스/환경 제약",
-			"- 예시: 단일 서버, 주말 제외, 네트워크 제한",
-			"- 지금 답변: 제약이 없으면 `skip` 입력",
-		}, "\n"), true
-	default:
-		return "", false
-	}
-}
-
-func isLikelyTelegramPRDQuestion(input string) bool {
-	v := strings.TrimSpace(strings.ToLower(input))
-	if v == "" {
-		return false
-	}
-	if strings.Contains(v, "?") || strings.Contains(v, "？") {
-		return true
-	}
-	keywords := []string{
-		"뭐", "뭔", "무엇", "어떻게", "왜", "의미", "뜻", "설명", "예시", "모르",
-		"what", "why", "how", "meaning", "example", "explain",
-	}
-	for _, k := range keywords {
-		if strings.Contains(v, k) {
-			return true
-		}
-	}
-	return false
 }
 
 func recordTelegramPRDAssumption(ctx *telegramPRDContext, field, value string) {
@@ -2245,6 +2528,33 @@ func formatTelegramPRDClarityQuestion(status telegramPRDClarityStatus) string {
 	return strings.Join(lines, "\n")
 }
 
+func formatTelegramPRDCodexRefineQuestion(refine telegramPRDCodexRefineResponse) string {
+	lines := []string{
+		"prd refine question",
+		fmt.Sprintf("- score: %d/100 (gate=%d)", refine.Score, telegramPRDClarityMinScore),
+		"- scoring_mode: codex",
+	}
+	if refine.ReadyToApply {
+		lines = append(lines, "- status: ready_to_apply")
+		lines = append(lines, "- next: /prd apply")
+		return strings.Join(lines, "\n")
+	}
+	if strings.TrimSpace(refine.Ask) != "" {
+		lines = append(lines, "- ask: "+refine.Ask)
+	}
+	if stage, ok := normalizeTelegramPRDRefineSuggestedStage(refine.SuggestedStage); ok {
+		lines = append(lines, "- next_stage: "+stage)
+	}
+	if len(refine.Missing) > 0 {
+		lines = append(lines, "- missing_top: "+refine.Missing[0])
+	}
+	if strings.TrimSpace(refine.Reason) != "" {
+		lines = append(lines, "- reason: "+refine.Reason)
+	}
+	lines = append(lines, "- hint: 답변이 애매하면 `skip` 또는 `default` 입력")
+	return strings.Join(lines, "\n")
+}
+
 func formatTelegramPRDScore(status telegramPRDClarityStatus) string {
 	lines := []string{
 		"prd clarity score",
@@ -2325,6 +2635,206 @@ func parseTelegramPRDStoryPriority(input string) (int, error) {
 	return n, nil
 }
 
+func parseTelegramPRDStoryRoleAndPriorityInput(session telegramPRDSession, rawRole, rawPriority string) (string, int, bool, error) {
+	roleInput := strings.TrimSpace(rawRole)
+	priorityInput := strings.TrimSpace(rawPriority)
+
+	if priorityInput == "" {
+		fields := strings.Fields(roleInput)
+		if len(fields) > 0 {
+			roleInput = fields[0]
+		}
+		if len(fields) == 2 {
+			priorityInput = fields[1]
+		}
+		if len(fields) > 2 {
+			return "", 0, false, fmt.Errorf("invalid role input: %q (use role or role priority)", rawRole)
+		}
+	}
+
+	role, err := parseTelegramPRDStoryRole(roleInput)
+	if err != nil {
+		return "", 0, false, err
+	}
+	if strings.TrimSpace(priorityInput) == "" {
+		return role, 0, false, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(priorityInput), "default") || strings.EqualFold(strings.TrimSpace(priorityInput), "skip") {
+		return role, 0, false, nil
+	}
+
+	priority, err := parseTelegramPRDStoryPriority(priorityInput)
+	if err != nil {
+		return "", 0, false, err
+	}
+	return role, priority, true, nil
+}
+
+func parseTelegramPRDQuickStoryInput(session telegramPRDSession, input string) (telegramPRDStory, bool, error) {
+	if !strings.Contains(input, "|") {
+		return telegramPRDStory{}, false, nil
+	}
+	partsRaw := strings.Split(input, "|")
+	parts := make([]string, 0, len(partsRaw))
+	for _, p := range partsRaw {
+		parts = append(parts, strings.TrimSpace(p))
+	}
+	if len(parts) < 3 || len(parts) > 4 {
+		return telegramPRDStory{}, true, fmt.Errorf("quick format: 제목 | 설명 | role [priority] 또는 제목 | 설명 | role | priority")
+	}
+	title := strings.TrimSpace(parts[0])
+	desc := strings.TrimSpace(parts[1])
+	if title == "" || desc == "" {
+		return telegramPRDStory{}, true, fmt.Errorf("quick format requires non-empty title and description")
+	}
+	rawRole := strings.TrimSpace(parts[2])
+	rawPriority := ""
+	if len(parts) == 4 {
+		rawPriority = strings.TrimSpace(parts[3])
+	}
+	role, priority, explicitPriority, err := parseTelegramPRDStoryRoleAndPriorityInput(session, rawRole, rawPriority)
+	if err != nil {
+		return telegramPRDStory{}, true, err
+	}
+	if !explicitPriority {
+		priority = 0
+	}
+	return telegramPRDStory{
+		Title:       title,
+		Description: desc,
+		Role:        role,
+		Priority:    priority,
+	}, true, nil
+}
+
+func telegramPRDAppendStoryFromDraft(paths ralph.Paths, session telegramPRDSession, role string, priority int, explicitPriority bool) (telegramPRDSession, telegramPRDStory, string, error) {
+	story := telegramPRDStory{
+		Title:       strings.TrimSpace(session.DraftTitle),
+		Description: strings.TrimSpace(session.DraftDesc),
+		Role:        strings.TrimSpace(role),
+		Priority:    priority,
+	}
+	if strings.TrimSpace(story.Title) == "" || strings.TrimSpace(story.Description) == "" || strings.TrimSpace(story.Role) == "" {
+		return session, telegramPRDStory{}, "", fmt.Errorf("incomplete story draft; run /prd cancel then /prd start")
+	}
+	prioritySource := "manual"
+	if !explicitPriority || story.Priority <= 0 {
+		resolvedPriority, source := resolveTelegramPRDStoryPriority(paths, session, story)
+		story.Priority = resolvedPriority
+		prioritySource = source
+	} else if story.Priority <= 0 {
+		story.Priority = telegramPRDStoryPriorityForRole(session, story.Role)
+		prioritySource = "fallback_role_profile"
+	}
+	story.ID = telegramPRDStoryID(session, len(session.Stories)+1)
+	session.Stories = append(session.Stories, story)
+	session.DraftTitle = ""
+	session.DraftDesc = ""
+	session.DraftRole = ""
+	session.Stage = telegramPRDStageAwaitStoryTitle
+	return session, story, prioritySource, nil
+}
+
+func telegramPRDAppendStoryFromQuick(paths ralph.Paths, session telegramPRDSession, story telegramPRDStory) (telegramPRDSession, string, error) {
+	s := story
+	if strings.TrimSpace(s.Role) == "" {
+		return session, "", fmt.Errorf("quick story role is required")
+	}
+	prioritySource := "manual"
+	if s.Priority <= 0 {
+		resolvedPriority, source := resolveTelegramPRDStoryPriority(paths, session, s)
+		s.Priority = resolvedPriority
+		prioritySource = source
+	}
+	s.ID = telegramPRDStoryID(session, len(session.Stories)+1)
+	session.Stories = append(session.Stories, s)
+	session.DraftTitle = ""
+	session.DraftDesc = ""
+	session.DraftRole = ""
+	session.Stage = telegramPRDStageAwaitStoryTitle
+	return session, telegramPRDStoryAddedReply(session, s, prioritySource), nil
+}
+
+func telegramPRDStoryAddedReply(session telegramPRDSession, story telegramPRDStory, prioritySource string) string {
+	clarity := evaluateTelegramPRDClarity(session)
+	next := "다음 story 제목 입력 또는 /prd preview /prd save /prd apply"
+	if !clarity.ReadyToApply {
+		next = "/prd refine (부족 컨텍스트 질문 진행) 또는 다음 story 제목 입력"
+	}
+	if strings.TrimSpace(prioritySource) == "" {
+		prioritySource = "manual"
+	}
+	return fmt.Sprintf(
+		"story added\n- id: %s\n- title: %s\n- role: %s\n- priority: %d\n- priority_source: %s\n- stories_total: %d\n- clarity_score: %d/100\n- next: %s",
+		story.ID,
+		compactSingleLine(story.Title, 90),
+		story.Role,
+		story.Priority,
+		prioritySource,
+		len(session.Stories),
+		clarity.Score,
+		next,
+	)
+}
+
+func telegramPRDStageAnswerFormat(stage string) string {
+	switch stage {
+	case telegramPRDStageAwaitProduct:
+		return "제품/프로젝트 이름 1줄"
+	case telegramPRDStageAwaitProblem:
+		return "현재 핵심 문제를 한 줄로 명확히 입력"
+	case telegramPRDStageAwaitGoal:
+		return "이번 사이클 완료 목표를 한 줄로 입력"
+	case telegramPRDStageAwaitInScope:
+		return "이번 사이클에서 반드시 할 항목 1~3개"
+	case telegramPRDStageAwaitOutOfScope:
+		return "이번 사이클에서 제외할 항목 1~3개"
+	case telegramPRDStageAwaitAcceptance:
+		return "검증 가능한 수용 기준 2~3개"
+	case telegramPRDStageAwaitConstraints:
+		return "제약 사항(없으면 skip)"
+	case telegramPRDStageAwaitStoryTitle:
+		return "story 제목 1줄 또는 quick 입력: 제목 | 설명 | role [priority]"
+	case telegramPRDStageAwaitStoryDesc:
+		return "story 설명 1~3문장(배경/가치/완료조건)"
+	case telegramPRDStageAwaitStoryRole:
+		return "manager|planner|developer|qa 또는 role priority (예: developer 900)"
+	case telegramPRDStageAwaitStoryPrio:
+		return fmt.Sprintf("양의 정수 priority (예: %d) 또는 default", telegramPRDDefaultPriority)
+	default:
+		return "현재 단계 요구값에 맞는 직접 답변"
+	}
+}
+
+func telegramPRDStageAssistFallback(stage string) string {
+	switch stage {
+	case telegramPRDStageAwaitStoryTitle:
+		return strings.Join([]string{
+			"story title 가이드",
+			"- 사용자 행동 + 기대 결과를 한 줄로 입력하세요",
+			"- 예시: 결제 실패 시 자동 재시도 상태 알림",
+			"- quick 입력: 제목 | 설명 | role [priority]",
+			"- 추천이 필요하면 `스토리 제목 3개 추천`처럼 요청하세요",
+		}, "\n")
+	case telegramPRDStageAwaitStoryDesc:
+		return strings.Join([]string{
+			"story description 가이드",
+			"- 배경/문제, 기대 효과, 완료 조건을 짧게 적으세요",
+			"- 예시: 실패 감지 시 3회 재시도 후 알림을 보내 운영자 수동 개입을 줄인다",
+		}, "\n")
+	case telegramPRDStageAwaitStoryRole:
+		return "role 가이드\n- manager|planner|developer|qa 입력\n- 선택: role priority (예: developer 900)"
+	case telegramPRDStageAwaitStoryPrio:
+		return fmt.Sprintf("priority 가이드\n- 양의 정수를 입력하세요\n- 기본값 사용은 `default` (=%d)", telegramPRDDefaultPriority)
+	default:
+		return strings.Join([]string{
+			"입력 가이드",
+			"- 현재 단계 질문에 맞는 값을 직접 입력하세요",
+			fmt.Sprintf("- 현재 단계: %s", telegramPRDStagePrompt(stage)),
+		}, "\n")
+	}
+}
+
 func telegramPRDStagePrompt(stage string) string {
 	switch stage {
 	case telegramPRDStageAwaitProduct:
@@ -2342,13 +2852,13 @@ func telegramPRDStagePrompt(stage string) string {
 	case telegramPRDStageAwaitConstraints:
 		return "제약 사항을 입력하세요 (옵션, skip 가능)"
 	case telegramPRDStageAwaitStoryTitle:
-		return "story 제목을 입력하세요"
+		return "story 제목을 입력하세요 (quick: 제목 | 설명 | role [priority])"
 	case telegramPRDStageAwaitStoryDesc:
 		return "story 설명을 입력하세요"
 	case telegramPRDStageAwaitStoryRole:
-		return "role 입력 (manager|planner|developer|qa)"
+		return "role 입력 (manager|planner|developer|qa, optional: role priority)"
 	case telegramPRDStageAwaitStoryPrio:
-		return fmt.Sprintf("priority 입력 (숫자, 기본값=%d)", telegramPRDDefaultPriority)
+		return "priority 입력 (숫자, default=role 기본값)"
 	default:
 		return "unknown stage"
 	}
@@ -2706,7 +3216,7 @@ func writeTelegramPRDFile(path string, session telegramPRDSession) error {
 			s.Role = "developer"
 		}
 		if s.Priority <= 0 {
-			s.Priority = telegramPRDDefaultPriority
+			s.Priority = telegramPRDStoryPriorityForRole(session, s.Role)
 		}
 		stories = append(stories, s)
 	}
@@ -2718,13 +3228,14 @@ func writeTelegramPRDFile(path string, session telegramPRDSession) error {
 			"clarity_score":    clarity.Score,
 			"clarity_gate":     telegramPRDClarityMinScore,
 			"context": map[string]any{
-				"problem":      strings.TrimSpace(session.Context.Problem),
-				"goal":         strings.TrimSpace(session.Context.Goal),
-				"in_scope":     strings.TrimSpace(session.Context.InScope),
-				"out_of_scope": strings.TrimSpace(session.Context.OutOfScope),
-				"acceptance":   strings.TrimSpace(session.Context.Acceptance),
-				"constraints":  strings.TrimSpace(session.Context.Constraints),
-				"assumptions":  session.Context.Assumptions,
+				"problem":        strings.TrimSpace(session.Context.Problem),
+				"goal":           strings.TrimSpace(session.Context.Goal),
+				"in_scope":       strings.TrimSpace(session.Context.InScope),
+				"out_of_scope":   strings.TrimSpace(session.Context.OutOfScope),
+				"acceptance":     strings.TrimSpace(session.Context.Acceptance),
+				"constraints":    strings.TrimSpace(session.Context.Constraints),
+				"assumptions":    session.Context.Assumptions,
+				"agent_priority": normalizeTelegramPRDAgentPriorityMap(session.Context.AgentPriority),
 			},
 		},
 		"userStories": telegramPRDDocument{
@@ -2828,7 +3339,7 @@ func buildTelegramHelp(allowControl bool) string {
 			"",
 			"PRD Wizard",
 			"- /prd help",
-			"- /prd start | /prd refine | /prd score | /prd apply | /prd approve",
+			"- /prd start | /prd refine | /prd priority | /prd score | /prd apply | /prd approve",
 		)
 	} else {
 		lines = append(lines, "", "Control", "- disabled (--allow-control=false)")
