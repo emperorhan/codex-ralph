@@ -1024,6 +1024,7 @@ var telegramPRDSessionStoreMu sync.Mutex
 var telegramPRDCodexAssistAnalyzer = analyzeTelegramPRDInputWithCodex
 var telegramPRDStoryPriorityEstimator = estimateTelegramPRDStoryPriorityWithCodex
 var telegramPRDRefineAnalyzer = analyzeTelegramPRDRefineWithCodex
+var telegramPRDScoreAnalyzer = analyzeTelegramPRDScoreWithCodex
 
 func telegramPRDCommand(paths ralph.Paths, chatID int64, rawArgs string) (string, error) {
 	fields := strings.Fields(strings.TrimSpace(rawArgs))
@@ -1321,26 +1322,10 @@ func telegramPRDRefineSession(paths ralph.Paths, chatID int64) (string, error) {
 	}
 
 	status := evaluateTelegramPRDClarity(session)
-	if status.ReadyToApply {
-		session.Stage = telegramPRDStageAwaitStoryTitle
-		session.LastUpdatedAtUT = time.Now().UTC().Format(time.RFC3339)
-		if err := telegramUpsertPRDSession(paths, session); err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("clarity check complete\n- score: %d/100\n- status: ready_to_apply\n- next: /prd apply", status.Score), nil
-	}
-	if status.NextStage != "" {
-		session.Stage = status.NextStage
-		session.Approved = false
-		session.LastUpdatedAtUT = time.Now().UTC().Format(time.RFC3339)
-		if err := telegramUpsertPRDSession(paths, session); err != nil {
-			return "", err
-		}
-	}
 	if codexRefineErr != nil {
 		fmt.Fprintf(os.Stderr, "[telegram] prd refine codex fallback: %v\n", codexRefineErr)
 	}
-	return formatTelegramPRDRefineUnavailable(status, codexRefineErr), nil
+	return formatTelegramPRDRefineUnavailable(session.Stage, status.Score, codexRefineErr), nil
 }
 
 func telegramPRDScoreSession(paths ralph.Paths, chatID int64) (string, error) {
@@ -1734,21 +1719,10 @@ func advanceTelegramPRDRefineFlow(paths ralph.Paths, session telegramPRDSession)
 	}
 
 	status := evaluateTelegramPRDClarity(session)
-	if status.ReadyToApply {
-		session.Stage = telegramPRDStageAwaitStoryTitle
-		return session, fmt.Sprintf(
-			"clarity updated\n- score: %d/100\n- status: ready_to_apply\n- next: story 추가 또는 /prd apply",
-			status.Score,
-		), nil
-	}
-	session.Stage = status.NextStage
-	if session.Stage == "" {
-		session.Stage = telegramPRDStageAwaitStoryTitle
-	}
 	if codexRefineErr != nil {
 		fmt.Fprintf(os.Stderr, "[telegram] prd refine codex fallback: %v\n", codexRefineErr)
 	}
-	return session, formatTelegramPRDRefineUnavailable(status, codexRefineErr), nil
+	return session, formatTelegramPRDRefineUnavailable(session.Stage, status.Score, codexRefineErr), nil
 }
 
 func telegramPRDAssistInput(paths ralph.Paths, session telegramPRDSession, input string) (telegramPRDInputAssistResult, error) {
@@ -2050,7 +2024,7 @@ func refreshTelegramPRDScoreWithCodex(paths ralph.Paths, session telegramPRDSess
 func refreshTelegramPRDRefineWithCodex(paths ralph.Paths, session telegramPRDSession) (telegramPRDSession, telegramPRDCodexRefineResponse, bool, error) {
 	refine, err := telegramPRDRefineAnalyzer(paths, session)
 	if err != nil {
-		score, scoreErr := analyzeTelegramPRDScoreWithCodex(paths, session)
+		score, scoreErr := telegramPRDScoreAnalyzer(paths, session)
 		if scoreErr != nil {
 			return session, telegramPRDCodexRefineResponse{}, false, fmt.Errorf("codex refine failed: %w (score fallback failed: %v)", err, scoreErr)
 		}
@@ -2657,18 +2631,14 @@ func formatTelegramPRDCodexRefineQuestion(refine telegramPRDCodexRefineResponse)
 	return strings.Join(lines, "\n")
 }
 
-func formatTelegramPRDRefineUnavailable(status telegramPRDClarityStatus, err error) string {
+func formatTelegramPRDRefineUnavailable(currentStage string, fallbackScore int, err error) string {
 	lines := []string{
-		"prd refine question",
-		fmt.Sprintf("- score: %d/100 (gate=%d)", status.Score, telegramPRDClarityMinScore),
+		"prd refine unavailable",
+		fmt.Sprintf("- score: %d/100 (gate=%d)", fallbackScore, telegramPRDClarityMinScore),
 		"- scoring_mode: codex_unavailable",
-		"- ask: 현재 문맥에서 가장 중요한 누락/모호 지점을 한 문장으로 구체화해 주세요.",
-	}
-	if len(status.Missing) > 0 {
-		lines = append(lines, "- missing_top: "+status.Missing[0])
-	}
-	if status.NextStage != "" {
-		lines = append(lines, "- next_stage: "+status.NextStage)
+		fmt.Sprintf("- current_stage: %s", valueOrDash(currentStage)),
+		"- reason: codex refine 실패로 동적 질문 생성 불가",
+		"- next: codex 상태 복구 후 `/prd refine` 재시도",
 	}
 	if err != nil {
 		lines = append(lines, "- note: codex refine unavailable")
@@ -2680,7 +2650,7 @@ func formatTelegramPRDRefineUnavailable(status telegramPRDClarityStatus, err err
 			lines = append(lines, "- codex_detail: "+detail)
 		}
 	}
-	lines = append(lines, "- hint: 답변이 애매하면 `skip` 또는 `default` 입력")
+	lines = append(lines, "- hint: `/doctor` 또는 telegram tail 로그로 원인 확인")
 	return strings.Join(lines, "\n")
 }
 

@@ -494,6 +494,19 @@ func TestParseTelegramPRDStoryPriority(t *testing.T) {
 
 func TestAdvanceTelegramPRDSessionFlow(t *testing.T) {
 	t.Parallel()
+	oldRefine := telegramPRDRefineAnalyzer
+	t.Cleanup(func() { telegramPRDRefineAnalyzer = oldRefine })
+	telegramPRDRefineAnalyzer = func(_ ralph.Paths, s telegramPRDSession) (telegramPRDCodexRefineResponse, error) {
+		status := evaluateTelegramPRDClarity(s)
+		return telegramPRDCodexRefineResponse{
+			Score:          status.Score,
+			ReadyToApply:   status.ReadyToApply,
+			Ask:            "test question",
+			Missing:        status.Missing,
+			SuggestedStage: status.NextStage,
+			Reason:         "test refine",
+		}, nil
+	}
 
 	s := telegramPRDSession{
 		ChatID: 1,
@@ -850,6 +863,19 @@ func TestEvaluateTelegramPRDClarityAssumedValueRequiresRefine(t *testing.T) {
 
 func TestAdvanceTelegramPRDSessionQuestionInputAdvancesWithoutAssist(t *testing.T) {
 	t.Parallel()
+	oldRefine := telegramPRDRefineAnalyzer
+	t.Cleanup(func() { telegramPRDRefineAnalyzer = oldRefine })
+	telegramPRDRefineAnalyzer = func(_ ralph.Paths, s telegramPRDSession) (telegramPRDCodexRefineResponse, error) {
+		status := evaluateTelegramPRDClarity(s)
+		return telegramPRDCodexRefineResponse{
+			Score:          status.Score,
+			ReadyToApply:   status.ReadyToApply,
+			Ask:            "test question",
+			Missing:        status.Missing,
+			SuggestedStage: status.NextStage,
+			Reason:         "test refine",
+		}, nil
+	}
 
 	s := telegramPRDSession{
 		ChatID:      1,
@@ -1074,6 +1100,70 @@ func TestTelegramPRDRefineSessionUsesCodexDynamicQuestion(t *testing.T) {
 	}
 }
 
+func TestTelegramPRDRefineSessionCodexUnavailableNoHeuristicQuestion(t *testing.T) {
+	oldRefine := telegramPRDRefineAnalyzer
+	oldScore := telegramPRDScoreAnalyzer
+	t.Cleanup(func() {
+		telegramPRDRefineAnalyzer = oldRefine
+		telegramPRDScoreAnalyzer = oldScore
+	})
+	telegramPRDRefineAnalyzer = func(_ ralph.Paths, _ telegramPRDSession) (telegramPRDCodexRefineResponse, error) {
+		return telegramPRDCodexRefineResponse{}, fmt.Errorf("could not resolve host: api.openai.com")
+	}
+	telegramPRDScoreAnalyzer = func(_ ralph.Paths, _ telegramPRDSession) (telegramPRDCodexScoreResponse, error) {
+		return telegramPRDCodexScoreResponse{}, fmt.Errorf("could not resolve host: api.openai.com")
+	}
+
+	controlDir := filepath.Join(t.TempDir(), "control")
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("mkdir control dir: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	paths, err := ralph.NewPaths(controlDir, projectDir)
+	if err != nil {
+		t.Fatalf("new paths failed: %v", err)
+	}
+	session := telegramPRDSession{
+		ChatID:      88,
+		Stage:       telegramPRDStageAwaitProblem,
+		ProductName: "Wallet",
+		Context: telegramPRDContext{
+			Problem: "실패율이 높다",
+		},
+	}
+	if err := telegramUpsertPRDSession(paths, session); err != nil {
+		t.Fatalf("upsert session failed: %v", err)
+	}
+
+	reply, err := telegramPRDRefineSession(paths, 88)
+	if err != nil {
+		t.Fatalf("refine session failed: %v", err)
+	}
+	if !strings.Contains(reply, "prd refine unavailable") {
+		t.Fatalf("reply should indicate codex refine unavailable: %q", reply)
+	}
+	if strings.Contains(reply, "- ask:") {
+		t.Fatalf("reply should not include heuristic fixed ask: %q", reply)
+	}
+	if !strings.Contains(reply, "codex_error: network") {
+		t.Fatalf("reply should include codex error category: %q", reply)
+	}
+
+	updated, found, err := telegramLoadPRDSession(paths, 88)
+	if err != nil {
+		t.Fatalf("load updated session failed: %v", err)
+	}
+	if !found {
+		t.Fatalf("updated session not found")
+	}
+	if updated.Stage != telegramPRDStageAwaitProblem {
+		t.Fatalf("stage should remain unchanged when codex is unavailable: %s", updated.Stage)
+	}
+}
+
 func TestClassifyTelegramCodexFailure(t *testing.T) {
 	t.Parallel()
 
@@ -1105,17 +1195,18 @@ func TestClassifyTelegramCodexFailure(t *testing.T) {
 func TestFormatTelegramPRDRefineUnavailableIncludesCodexReason(t *testing.T) {
 	t.Parallel()
 
-	status := telegramPRDClarityStatus{
-		Score:     42,
-		NextStage: telegramPRDStageAwaitProblem,
-		Missing:   []string{"problem statement"},
-	}
-	out := formatTelegramPRDRefineUnavailable(status, fmt.Errorf("could not resolve host: api.openai.com"))
+	out := formatTelegramPRDRefineUnavailable(telegramPRDStageAwaitProblem, 42, fmt.Errorf("could not resolve host: api.openai.com"))
 	if !strings.Contains(out, "codex_error: network") {
 		t.Fatalf("expected network codex_error in fallback output: %q", out)
 	}
 	if !strings.Contains(out, "codex_detail:") {
 		t.Fatalf("expected codex_detail in fallback output: %q", out)
+	}
+	if strings.Contains(out, "- ask:") {
+		t.Fatalf("fallback output should not include heuristic ask: %q", out)
+	}
+	if !strings.Contains(out, "next: codex 상태 복구 후") {
+		t.Fatalf("fallback output should guide retry after codex recovery: %q", out)
 	}
 }
 
