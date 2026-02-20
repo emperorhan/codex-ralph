@@ -51,7 +51,7 @@ ralphctl --help
 프로젝트 루트에서:
 
 ```bash
-ralphctl --project-dir "$PWD" setup --mode quickstart
+ralphctl --project-dir "$PWD" setup
 ```
 
 이후:
@@ -60,14 +60,17 @@ ralphctl --project-dir "$PWD" setup --mode quickstart
 - 기본 설정 파일:
   - `.ralph/profile.yaml`
   - `.ralph/profile.local.yaml`
+- 안정성 기본값(timeout/retry/watchdog/supervisor)이 적용됩니다.
+- 루프 daemon이 자동 시작됩니다.
 
 ### 4) 첫 동작 확인
 
 ```bash
 ./ralph doctor
-./ralph start
 ./ralph status
+./ralph tail
 ./ralph stop
+./ralph start
 ```
 
 문제가 있으면:
@@ -122,10 +125,10 @@ PRD JSON 일괄 생성:
 
 ### 1) 원격/장시간 실행
 
-무중단 운영 preset:
+기본 setup만으로 무중단 daemon 운영이 시작됩니다:
 
 ```bash
-ralphctl --project-dir "$PWD" setup --mode remote --start
+ralphctl --project-dir "$PWD" setup
 ```
 
 서비스 등록(systemd/launchd):
@@ -230,18 +233,34 @@ ralphctl --project-dir "$PWD" telegram setup --non-interactive \
 - `/fleet [all|<project_id>]`
 - (`--allow-control`일 때) `/start|/stop|/restart|/doctor_repair|/recover [all|<project_id>]`
 
-### 4) 안정성 최소 튜닝
+### 4) 실행 중 graceful 설정 변경
 
-`profile.local.yaml` 예시:
+`profile.local.yaml`을 수정하면 실행 중인 루프가 자동으로 재로딩합니다(다음 loop부터 반영).
+
+자주 쓰는 값:
 
 ```yaml
 codex_model: auto
 codex_exec_timeout_sec: 900
 codex_retry_max_attempts: 3
 codex_retry_backoff_sec: 10
+idle_sleep_sec: 20
 inprogress_watchdog_enabled: true
-supervisor_enabled: true
+inprogress_watchdog_stale_sec: 1800
+inprogress_watchdog_scan_loops: 1
 ```
+
+반영 확인:
+
+```bash
+./ralph status
+```
+
+`last_profile_reload_at`, `profile_reload_count`가 업데이트됩니다.
+
+주의:
+
+- `supervisor_enabled`, `supervisor_restart_delay_sec` 변경은 daemon 재시작 후 반영됩니다.
 
 ## License
 

@@ -21,14 +21,6 @@ const (
 	SetupModeCustom        SetupMode = "custom"
 )
 
-type SetupFlowMode string
-
-const (
-	SetupFlowModeQuickstart SetupFlowMode = "quickstart"
-	SetupFlowModeAdvanced   SetupFlowMode = "advanced"
-	SetupFlowModeRemote     SetupFlowMode = "remote"
-)
-
 type SetupSelections struct {
 	Plugin           string
 	RoleRulesEnabled bool
@@ -37,19 +29,6 @@ type SetupSelections struct {
 	DoctorAutoRepair bool
 	ValidationMode   SetupMode
 	ValidateCmd      string
-}
-
-func NormalizeSetupFlowMode(raw string) SetupFlowMode {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", string(SetupFlowModeAdvanced):
-		return SetupFlowModeAdvanced
-	case string(SetupFlowModeQuickstart):
-		return SetupFlowModeQuickstart
-	case string(SetupFlowModeRemote):
-		return SetupFlowModeRemote
-	default:
-		return ""
-	}
 }
 
 func DefaultSetupSelections(preferredPlugin string) SetupSelections {
@@ -250,7 +229,7 @@ func ApplySetupSelections(paths Paths, executablePath string, selections SetupSe
 	return EnsureRoleRuleFiles(paths)
 }
 
-func ApplyRemoteProfilePreset(paths Paths) error {
+func ApplyStabilityDefaults(paths Paths) error {
 	if err := EnsureLayout(paths); err != nil {
 		return err
 	}
@@ -266,9 +245,9 @@ func ApplyRemoteProfilePreset(paths Paths) error {
 		return fmt.Errorf("stat profile.local.yaml: %w", err)
 	}
 
-	setProfileConfigValue(existing, "codex_exec_timeout_sec", "1200", "RALPH_CODEX_EXEC_TIMEOUT_SEC")
-	setProfileConfigValue(existing, "codex_retry_max_attempts", "5", "RALPH_CODEX_RETRY_MAX_ATTEMPTS")
-	setProfileConfigValue(existing, "codex_retry_backoff_sec", "15", "RALPH_CODEX_RETRY_BACKOFF_SEC")
+	setProfileConfigValue(existing, "codex_exec_timeout_sec", "900", "RALPH_CODEX_EXEC_TIMEOUT_SEC")
+	setProfileConfigValue(existing, "codex_retry_max_attempts", "3", "RALPH_CODEX_RETRY_MAX_ATTEMPTS")
+	setProfileConfigValue(existing, "codex_retry_backoff_sec", "10", "RALPH_CODEX_RETRY_BACKOFF_SEC")
 	setProfileConfigValue(existing, "codex_skip_git_repo_check", "true", "RALPH_CODEX_SKIP_GIT_REPO_CHECK")
 	setProfileConfigValue(existing, "codex_output_last_message_enabled", "true", "RALPH_CODEX_OUTPUT_LAST_MESSAGE_ENABLED")
 	setProfileConfigValue(existing, "inprogress_watchdog_enabled", "true", "RALPH_INPROGRESS_WATCHDOG_ENABLED")
@@ -281,6 +260,11 @@ func ApplyRemoteProfilePreset(paths Paths) error {
 		return fmt.Errorf("write profile.local.yaml: %w", err)
 	}
 	return pruneLegacySetupEnvOverrides(paths.ProfileLocalFile)
+}
+
+// ApplyRemoteProfilePreset is kept for backward compatibility.
+func ApplyRemoteProfilePreset(paths Paths) error {
+	return ApplyStabilityDefaults(paths)
 }
 
 func pickDefaultPlugin(plugins []string, current string) string {

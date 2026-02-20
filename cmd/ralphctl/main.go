@@ -143,8 +143,9 @@ func run() error {
 		fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 		plugin := fs.String("plugin", "", "preferred default plugin in wizard")
 		nonInteractive := fs.Bool("non-interactive", false, "apply defaults without prompts")
-		modeRaw := fs.String("mode", string(ralph.SetupFlowModeAdvanced), "setup mode: quickstart|advanced|remote")
-		startAfter := fs.Bool("start", false, "start daemon after setup completes")
+		advanced := fs.Bool("advanced", false, "run interactive setup wizard")
+		modeRaw := fs.String("mode", "", "deprecated: use --advanced")
+		startAfter := fs.Bool("start", true, "start daemon after setup completes")
 		if err := fs.Parse(cmdArgs); err != nil {
 			return err
 		}
@@ -152,47 +153,42 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		mode := ralph.NormalizeSetupFlowMode(*modeRaw)
-		if mode == "" {
-			return fmt.Errorf("invalid --mode: %s (expected quickstart|advanced|remote)", *modeRaw)
+		legacyMode := strings.ToLower(strings.TrimSpace(*modeRaw))
+		if legacyMode != "" {
+			switch legacyMode {
+			case "advanced":
+				*advanced = true
+			case "quickstart", "remote":
+				*advanced = false
+			default:
+				return fmt.Errorf("invalid --mode: %s (expected quickstart|advanced|remote)", legacyMode)
+			}
 		}
-		if *nonInteractive && mode == ralph.SetupFlowModeAdvanced {
-			mode = ralph.SetupFlowModeQuickstart
+		if *nonInteractive {
+			*advanced = false
 		}
-		if mode == ralph.SetupFlowModeQuickstart || mode == ralph.SetupFlowModeRemote {
+
+		if *advanced {
+			if err := ralph.RunSetupWizard(paths, exe, *plugin, os.Stdin, os.Stdout); err != nil {
+				return err
+			}
+		} else {
 			selection := ralph.DefaultSetupSelections(strings.TrimSpace(*plugin))
 			if err := ralph.ApplySetupSelections(paths, exe, selection); err != nil {
 				return err
 			}
-			if mode == ralph.SetupFlowModeRemote {
-				if err := ralph.ApplyRemoteProfilePreset(paths); err != nil {
-					return err
-				}
-			}
-			fmt.Printf("setup complete (%s)\n", mode)
-			fmt.Printf("- helper: %s\n", filepath.Join(paths.ProjectDir, "ralph"))
-			fmt.Printf("- profile_yaml: %s\n", paths.ProfileYAMLFile)
-			fmt.Printf("- profile_local_yaml: %s\n", paths.ProfileLocalYAMLFile)
-			fmt.Printf("- profile_env_override: %s\n", paths.ProfileLocalFile)
-			if mode == ralph.SetupFlowModeRemote {
-				fmt.Println("- remote_preset: codex timeout/retry + watchdog + supervisor enabled")
-			}
-			if *startAfter {
-				startResult, err := startProjectDaemon(paths, startOptions{
-					DoctorRepair: true,
-					FixPerms:     true,
-					Out:          os.Stdout,
-				})
-				if err != nil {
-					return err
-				}
-				fmt.Printf("- daemon: %s\n", startResult)
-			}
-			return nil
 		}
-		if err := ralph.RunSetupWizard(paths, exe, *plugin, os.Stdin, os.Stdout); err != nil {
+		if err := ralph.ApplyStabilityDefaults(paths); err != nil {
 			return err
 		}
+		fmt.Println("setup complete")
+		fmt.Printf("- helper: %s\n", filepath.Join(paths.ProjectDir, "ralph"))
+		fmt.Printf("- profile_yaml: %s\n", paths.ProfileYAMLFile)
+		fmt.Printf("- profile_local_yaml: %s\n", paths.ProfileLocalYAMLFile)
+		fmt.Printf("- profile_env_override: %s\n", paths.ProfileLocalFile)
+		fmt.Println("- stability_defaults: timeout/retry + watchdog + supervisor enabled")
+		fmt.Println("- graceful_reload: runtime loop values apply automatically while running (loop boundary)")
+		fmt.Println("- restart_required: supervisor settings")
 		if *startAfter {
 			startResult, err := startProjectDaemon(paths, startOptions{
 				DoctorRepair: true,

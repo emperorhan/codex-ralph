@@ -67,20 +67,20 @@ func TestVerifyPluginRegistryDetectsTamper(t *testing.T) {
 	}
 }
 
-func TestApplyRemoteProfilePreset(t *testing.T) {
+func TestApplyStabilityDefaults(t *testing.T) {
 	paths := newTestPaths(t)
 	resetProfileEnv(t)
 
-	if err := ApplyRemoteProfilePreset(paths); err != nil {
-		t.Fatalf("apply remote preset: %v", err)
+	if err := ApplyStabilityDefaults(paths); err != nil {
+		t.Fatalf("apply stability defaults: %v", err)
 	}
 	values, err := ReadYAMLFlatMap(paths.ProfileLocalYAMLFile)
 	if err != nil {
 		t.Fatalf("read profile.local.yaml: %v", err)
 	}
-	assertMapValue(t, values, "codex_exec_timeout_sec", "1200")
-	assertMapValue(t, values, "codex_retry_max_attempts", "5")
-	assertMapValue(t, values, "codex_retry_backoff_sec", "15")
+	assertMapValue(t, values, "codex_exec_timeout_sec", "900")
+	assertMapValue(t, values, "codex_retry_max_attempts", "3")
+	assertMapValue(t, values, "codex_retry_backoff_sec", "10")
 	assertMapValue(t, values, "inprogress_watchdog_enabled", "true")
 	assertMapValue(t, values, "supervisor_enabled", "true")
 }
