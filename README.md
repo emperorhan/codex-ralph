@@ -197,7 +197,14 @@ ralphctl --project-dir "$PWD" telegram setup --non-interactive \
 ```bash
 ralphctl --project-dir "$PWD" telegram setup
 ralphctl --project-dir "$PWD" telegram run
+ralphctl --project-dir "$PWD" telegram status
+ralphctl --project-dir "$PWD" telegram tail
+ralphctl --project-dir "$PWD" telegram stop
 ```
+
+- `telegram run`은 기본적으로 백그라운드 daemon으로 실행됩니다.
+- 터미널을 종료해도 계속 동작합니다.
+- 포그라운드로 실행하려면 `telegram run --foreground`를 사용하세요.
 
 비대화형:
 

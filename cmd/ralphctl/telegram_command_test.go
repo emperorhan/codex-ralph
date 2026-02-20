@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -256,5 +257,56 @@ func TestBuildStatusAlerts(t *testing.T) {
 	}
 	if !strings.Contains(joined, "[permission]") {
 		t.Fatalf("missing permission alert: %q", joined)
+	}
+}
+
+func TestEnsureTelegramForegroundArg(t *testing.T) {
+	t.Parallel()
+
+	original := []string{"--config-file", "/tmp/telegram.env"}
+	got := ensureTelegramForegroundArg(original)
+	if len(got) != len(original)+1 {
+		t.Fatalf("length mismatch: got=%d want=%d", len(got), len(original)+1)
+	}
+	if got[len(got)-1] != "--foreground" {
+		t.Fatalf("last arg mismatch: got=%q want=--foreground", got[len(got)-1])
+	}
+	if len(original) != 2 {
+		t.Fatalf("original slice should not be mutated")
+	}
+}
+
+func TestTelegramPIDState(t *testing.T) {
+	t.Parallel()
+
+	pidFile := filepath.Join(t.TempDir(), "telegram.pid")
+
+	pid, running, stale := telegramPIDState(pidFile)
+	if pid != 0 || running || stale {
+		t.Fatalf("missing pid file should be stopped/non-stale: pid=%d running=%t stale=%t", pid, running, stale)
+	}
+
+	if err := os.WriteFile(pidFile, []byte("invalid\n"), 0o644); err != nil {
+		t.Fatalf("write invalid pid file: %v", err)
+	}
+	_, running, stale = telegramPIDState(pidFile)
+	if running || !stale {
+		t.Fatalf("invalid pid file should be stale")
+	}
+
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+		t.Fatalf("write running pid file: %v", err)
+	}
+	pid, running, stale = telegramPIDState(pidFile)
+	if pid != os.Getpid() || !running || stale {
+		t.Fatalf("running pid mismatch: pid=%d running=%t stale=%t", pid, running, stale)
+	}
+
+	if err := os.WriteFile(pidFile, []byte("999999\n"), 0o644); err != nil {
+		t.Fatalf("write stale pid file: %v", err)
+	}
+	_, running, stale = telegramPIDState(pidFile)
+	if running || !stale {
+		t.Fatalf("non-running pid file should be stale")
 	}
 }

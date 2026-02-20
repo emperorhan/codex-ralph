@@ -37,6 +37,7 @@ func AutoFixPermissions(paths Paths) (PermissionFixResult, error) {
 		paths.CommonRulesFile,
 		paths.IssueTemplateFile,
 		paths.RunnerLogFile,
+		paths.TelegramLogFile(),
 		paths.BusyWaitStateFile,
 		paths.ProfileReloadStateFile,
 		paths.BusyWaitEventsFile,

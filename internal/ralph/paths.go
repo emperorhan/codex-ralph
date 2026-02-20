@@ -91,6 +91,14 @@ func (p Paths) RoleRunnerLogFile(role string) string {
 	return filepath.Join(p.LogsDir, fmt.Sprintf("runner.%s.out", role))
 }
 
+func (p Paths) TelegramPIDFile() string {
+	return filepath.Join(p.RalphDir, "telegram.pid")
+}
+
+func (p Paths) TelegramLogFile() string {
+	return filepath.Join(p.LogsDir, "telegram.out")
+}
+
 func (p Paths) RoleRulesFile(role string) string {
 	return filepath.Join(p.RulesDir, fmt.Sprintf("%s.md", role))
 }
@@ -128,6 +136,13 @@ func EnsureLayout(paths Paths) error {
 		f, createErr := os.OpenFile(paths.RunnerLogFile, os.O_CREATE|os.O_WRONLY, 0o644)
 		if createErr != nil {
 			return fmt.Errorf("create runner log: %w", createErr)
+		}
+		_ = f.Close()
+	}
+	if _, err := os.Stat(paths.TelegramLogFile()); os.IsNotExist(err) {
+		f, createErr := os.OpenFile(paths.TelegramLogFile(), os.O_CREATE|os.O_WRONLY, 0o644)
+		if createErr != nil {
+			return fmt.Errorf("create telegram log: %w", createErr)
 		}
 		_ = f.Close()
 	}

@@ -160,6 +160,8 @@ func RunDoctor(paths Paths) (DoctorReport, error) {
 		status, detail := evaluatePIDFile(paths.RolePIDFile(role))
 		report.add("daemon:"+role, status, detail)
 	}
+	status, detail = evaluatePIDFile(paths.TelegramPIDFile())
+	report.add("daemon:telegram", status, detail)
 
 	inProgressCount, inProgressErr := CountIssueFiles(paths.InProgressDir)
 	if inProgressErr != nil {
@@ -239,7 +241,7 @@ func RepairProject(paths Paths) ([]DoctorRepairAction, error) {
 		})
 	}
 
-	pidFiles := []string{paths.PIDFile}
+	pidFiles := []string{paths.PIDFile, paths.TelegramPIDFile()}
 	for _, role := range RequiredAgentRoles {
 		pidFiles = append(pidFiles, paths.RolePIDFile(role))
 	}

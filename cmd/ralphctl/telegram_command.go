@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -20,7 +21,7 @@ import (
 
 func runTelegramCommand(controlDir string, paths ralph.Paths, args []string) error {
 	usage := func() {
-		fmt.Fprintln(os.Stderr, "Usage: ralphctl --control-dir DIR --project-dir DIR telegram <run|setup> [flags]")
+		fmt.Fprintln(os.Stderr, "Usage: ralphctl --control-dir DIR --project-dir DIR telegram <run|setup|stop|status|tail> [flags]")
 		fmt.Fprintln(os.Stderr, "Env: RALPH_TELEGRAM_BOT_TOKEN, RALPH_TELEGRAM_CHAT_IDS, RALPH_TELEGRAM_USER_IDS, RALPH_TELEGRAM_ALLOW_CONTROL, RALPH_TELEGRAM_NOTIFY, RALPH_TELEGRAM_NOTIFY_SCOPE")
 	}
 	if len(args) == 0 {
@@ -33,6 +34,12 @@ func runTelegramCommand(controlDir string, paths ralph.Paths, args []string) err
 		return runTelegramRunCommand(controlDir, paths, args[1:])
 	case "setup":
 		return runTelegramSetupCommand(controlDir, args[1:])
+	case "stop":
+		return runTelegramStopCommand(paths, args[1:])
+	case "status":
+		return runTelegramStatusCommand(controlDir, paths, args[1:])
+	case "tail":
+		return runTelegramTailCommand(paths, args[1:])
 	default:
 		usage()
 		return fmt.Errorf("unknown telegram subcommand: %s", args[0])
@@ -48,6 +55,7 @@ func runTelegramRunCommand(controlDir string, paths ralph.Paths, args []string) 
 
 	fs := flag.NewFlagSet("telegram run", flag.ContinueOnError)
 	configFileFlag := fs.String("config-file", configFile, "telegram config file path")
+	foreground := fs.Bool("foreground", false, "run in foreground (default: start daemon and return)")
 	token := fs.String("token", firstNonEmpty(strings.TrimSpace(os.Getenv("RALPH_TELEGRAM_BOT_TOKEN")), cfg.Token), "telegram bot token")
 	chatIDsRaw := fs.String("chat-ids", firstNonEmpty(strings.TrimSpace(os.Getenv("RALPH_TELEGRAM_CHAT_IDS")), cfg.ChatIDs), "allowed chat IDs CSV (required)")
 	userIDsRaw := fs.String("user-ids", firstNonEmpty(strings.TrimSpace(os.Getenv("RALPH_TELEGRAM_USER_IDS")), cfg.UserIDs), "allowed user IDs CSV (optional; recommended for group chats)")
@@ -62,7 +70,7 @@ func runTelegramRunCommand(controlDir string, paths ralph.Paths, args []string) 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	_ = configFileFlag
+	configFile = strings.TrimSpace(*configFileFlag)
 
 	if strings.TrimSpace(*token) == "" {
 		return fmt.Errorf("--token is required (or run `ralphctl telegram setup`)")
@@ -94,11 +102,27 @@ func runTelegramRunCommand(controlDir string, paths ralph.Paths, args []string) 
 	if err != nil {
 		return fmt.Errorf("invalid --notify-scope: %w", err)
 	}
+	if !*foreground {
+		msg, err := startTelegramDaemon(paths, ensureTelegramForegroundArg(args))
+		if err != nil {
+			return err
+		}
+		fmt.Println(msg)
+		fmt.Printf("- control_dir: %s\n", controlDir)
+		fmt.Printf("- project_dir: %s\n", paths.ProjectDir)
+		fmt.Printf("- config_file: %s\n", configFile)
+		fmt.Printf("- pid_file: %s\n", paths.TelegramPIDFile())
+		fmt.Printf("- log_file: %s\n", paths.TelegramLogFile())
+		fmt.Println("- mode: daemon")
+		fmt.Println("- hint: stop with `ralphctl telegram stop`, logs with `ralphctl telegram tail`")
+		return nil
+	}
 
 	fmt.Println("telegram bot started")
 	fmt.Printf("- control_dir: %s\n", controlDir)
 	fmt.Printf("- project_dir: %s\n", paths.ProjectDir)
 	fmt.Printf("- config_file: %s\n", configFile)
+	fmt.Println("- mode: foreground")
 	fmt.Printf("- allow_control: %t\n", *allowControl)
 	fmt.Printf("- notify: %t\n", *enableNotify)
 	fmt.Printf("- notify_scope: %s\n", resolvedNotifyScope)
@@ -131,6 +155,60 @@ func runTelegramRunCommand(controlDir string, paths ralph.Paths, args []string) 
 		OnCommand:         telegramCommandHandler(controlDir, paths, *allowControl),
 		OnNotifyTick:      notifyHandler,
 	})
+}
+
+func runTelegramStopCommand(paths ralph.Paths, args []string) error {
+	fs := flag.NewFlagSet("telegram stop", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	msg, err := stopTelegramDaemon(paths)
+	if err != nil {
+		return err
+	}
+	fmt.Println(msg)
+	return nil
+}
+
+func runTelegramStatusCommand(controlDir string, paths ralph.Paths, args []string) error {
+	fs := flag.NewFlagSet("telegram status", flag.ContinueOnError)
+	offsetFile := fs.String("offset-file", filepath.Join(controlDir, "telegram.offset"), "telegram update offset file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := ralph.EnsureLayout(paths); err != nil {
+		return err
+	}
+
+	pid, running, stale := telegramPIDState(paths.TelegramPIDFile())
+	fmt.Println("## Telegram Bot Status")
+	fmt.Printf("- control_dir: %s\n", controlDir)
+	fmt.Printf("- project_dir: %s\n", paths.ProjectDir)
+	fmt.Printf("- pid_file: %s\n", paths.TelegramPIDFile())
+	fmt.Printf("- log_file: %s\n", paths.TelegramLogFile())
+	fmt.Printf("- offset_file: %s\n", strings.TrimSpace(*offsetFile))
+	switch {
+	case running:
+		fmt.Printf("- daemon: running(pid=%d)\n", pid)
+	case stale:
+		fmt.Printf("- daemon: stopped(stale_pid=%d)\n", pid)
+	default:
+		fmt.Println("- daemon: stopped")
+	}
+	return nil
+}
+
+func runTelegramTailCommand(paths ralph.Paths, args []string) error {
+	fs := flag.NewFlagSet("telegram tail", flag.ContinueOnError)
+	lines := fs.Int("lines", 120, "number of lines")
+	follow := fs.Bool("follow", true, "follow appended lines")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := ralph.EnsureLayout(paths); err != nil {
+		return err
+	}
+	return tailFile(paths.TelegramLogFile(), *lines, *follow)
 }
 
 func runTelegramSetupCommand(controlDir string, args []string) error {
@@ -287,6 +365,8 @@ func runTelegramSetupCommand(controlDir string, args []string) error {
 	fmt.Printf("- notify: %t\n", final.Notify)
 	fmt.Printf("- notify_scope: %s\n", final.NotifyScope)
 	fmt.Printf("- run: ralphctl --project-dir \"$PWD\" telegram run --config-file %s\n", configFile)
+	fmt.Printf("- status: ralphctl --project-dir \"$PWD\" telegram status\n")
+	fmt.Printf("- stop: ralphctl --project-dir \"$PWD\" telegram stop\n")
 	return nil
 }
 
@@ -1044,6 +1124,143 @@ func buildStatusAlerts(prev, current ralph.Status, retryThreshold, permThreshold
 	}
 
 	return out
+}
+
+func startTelegramDaemon(paths ralph.Paths, runArgs []string) (string, error) {
+	if err := ralph.EnsureLayout(paths); err != nil {
+		return "", err
+	}
+
+	pidFile := paths.TelegramPIDFile()
+	pid, running, stale := telegramPIDState(pidFile)
+	if running {
+		return fmt.Sprintf("telegram bot already running (pid=%d)", pid), nil
+	}
+	if stale {
+		_ = os.Remove(pidFile)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve executable: %w", err)
+	}
+	logFile := paths.TelegramLogFile()
+	logHandle, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return "", fmt.Errorf("open telegram log: %w", err)
+	}
+	defer logHandle.Close()
+
+	args := []string{
+		"--control-dir", paths.ControlDir,
+		"--project-dir", paths.ProjectDir,
+		"telegram",
+		"run",
+	}
+	args = append(args, runArgs...)
+
+	cmd := exec.Command(exe, args...)
+	cmd.Stdout = logHandle
+	cmd.Stderr = logHandle
+	cmd.Stdin = nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setsid:  true,
+		Setpgid: true,
+	}
+
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start telegram daemon: %w", err)
+	}
+	pid = cmd.Process.Pid
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
+		return "", fmt.Errorf("write telegram pid file: %w", err)
+	}
+	_ = cmd.Process.Release()
+	return fmt.Sprintf("telegram bot started (pid=%d)", pid), nil
+}
+
+func stopTelegramDaemon(paths ralph.Paths) (string, error) {
+	if err := ralph.EnsureLayout(paths); err != nil {
+		return "", err
+	}
+
+	pidFile := paths.TelegramPIDFile()
+	pid, running, stale := telegramPIDState(pidFile)
+	if !running {
+		_ = os.Remove(pidFile)
+		if stale {
+			return fmt.Sprintf("telegram bot stopped (stale pid removed: %d)", pid), nil
+		}
+		return "telegram bot is not running", nil
+	}
+
+	proc, err := os.FindProcess(pid)
+	if err == nil {
+		_ = proc.Signal(syscall.SIGTERM)
+	}
+	for i := 0; i < 30; i++ {
+		if !isTelegramPIDRunning(pid) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if isTelegramPIDRunning(pid) {
+		if proc, findErr := os.FindProcess(pid); findErr == nil {
+			_ = proc.Signal(syscall.SIGKILL)
+		}
+	}
+	_ = os.Remove(pidFile)
+	return fmt.Sprintf("telegram bot stopped (pid=%d)", pid), nil
+}
+
+func telegramPIDState(pidFile string) (int, bool, bool) {
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return 0, false, false
+	}
+	raw := strings.TrimSpace(string(data))
+	pid, err := strconv.Atoi(raw)
+	if err != nil || pid <= 0 {
+		return 0, false, true
+	}
+	if isTelegramPIDRunning(pid) {
+		return pid, true, false
+	}
+	return pid, false, true
+}
+
+func isTelegramPIDRunning(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+func ensureTelegramForegroundArg(args []string) []string {
+	out := append([]string{}, args...)
+	out = append(out, "--foreground")
+	return out
+}
+
+func tailFile(path string, lines int, follow bool) error {
+	if lines <= 0 {
+		lines = 120
+	}
+	tailArgs := []string{"-n", strconv.Itoa(lines)}
+	if follow {
+		tailArgs = append(tailArgs, "-f")
+	}
+	tailArgs = append(tailArgs, path)
+
+	cmd := exec.Command("tail", tailArgs...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	return cmd.Run()
 }
 
 func envBoolDefault(key string, defaultValue bool) bool {
