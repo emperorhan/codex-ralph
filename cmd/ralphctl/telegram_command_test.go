@@ -493,8 +493,43 @@ func TestAdvanceTelegramPRDSessionFlow(t *testing.T) {
 	if s, _, err = advanceTelegramPRDSession(s, "Wallet"); err != nil {
 		t.Fatalf("set product failed: %v", err)
 	}
-	if s.Stage != telegramPRDStageAwaitStoryTitle {
+	if s.Stage != telegramPRDStageAwaitProblem {
 		t.Fatalf("stage mismatch after product: %s", s.Stage)
+	}
+
+	if s, _, err = advanceTelegramPRDSession(s, "결제 실패율이 높다"); err != nil {
+		t.Fatalf("set problem failed: %v", err)
+	}
+	if s.Stage != telegramPRDStageAwaitGoal {
+		t.Fatalf("stage mismatch after problem: %s", s.Stage)
+	}
+
+	if s, _, err = advanceTelegramPRDSession(s, "실패율을 30%% 낮춘다"); err != nil {
+		t.Fatalf("set goal failed: %v", err)
+	}
+	if s.Stage != telegramPRDStageAwaitInScope {
+		t.Fatalf("stage mismatch after goal: %s", s.Stage)
+	}
+
+	if s, _, err = advanceTelegramPRDSession(s, "결제 실패 재시도"); err != nil {
+		t.Fatalf("set in-scope failed: %v", err)
+	}
+	if s.Stage != telegramPRDStageAwaitOutOfScope {
+		t.Fatalf("stage mismatch after in-scope: %s", s.Stage)
+	}
+
+	if s, _, err = advanceTelegramPRDSession(s, "신규 PG 연동 제외"); err != nil {
+		t.Fatalf("set out-of-scope failed: %v", err)
+	}
+	if s.Stage != telegramPRDStageAwaitAcceptance {
+		t.Fatalf("stage mismatch after out-of-scope: %s", s.Stage)
+	}
+
+	if s, _, err = advanceTelegramPRDSession(s, "핵심 시나리오 3개 통과"); err != nil {
+		t.Fatalf("set acceptance failed: %v", err)
+	}
+	if s.Stage != telegramPRDStageAwaitStoryTitle {
+		t.Fatalf("stage mismatch after acceptance: %s", s.Stage)
 	}
 
 	if s, _, err = advanceTelegramPRDSession(s, "결제 API 개선"); err != nil {
@@ -529,6 +564,98 @@ func TestAdvanceTelegramPRDSessionFlow(t *testing.T) {
 	}
 	if s.Stories[0].Role != "developer" || s.Stories[0].Priority != 10 {
 		t.Fatalf("story fields mismatch: role=%s priority=%d", s.Stories[0].Role, s.Stories[0].Priority)
+	}
+}
+
+func TestEvaluateTelegramPRDClarityReady(t *testing.T) {
+	t.Parallel()
+
+	s := telegramPRDSession{
+		ProductName: "Wallet",
+		Stories: []telegramPRDStory{
+			{
+				ID:          "US-001",
+				Title:       "결제 실패 복구",
+				Description: "실패 시 자동 재시도로 사용자 이탈을 줄인다",
+				Role:        "developer",
+				Priority:    10,
+			},
+		},
+		Context: telegramPRDContext{
+			Problem:    "결제 실패 원인 파악이 느리다",
+			Goal:       "실패 재현/복구 시간을 50% 단축한다",
+			InScope:    "결제 실패 감지와 재시도 로직",
+			OutOfScope: "신규 결제수단 도입",
+			Acceptance: "실패 시나리오 3종 자동 복구 및 알림",
+		},
+	}
+
+	status := evaluateTelegramPRDClarity(s)
+	if !status.ReadyToApply {
+		t.Fatalf("expected ready, got=%+v", status)
+	}
+	if status.Score < telegramPRDClarityMinScore {
+		t.Fatalf("score should meet gate: got=%d gate=%d", status.Score, telegramPRDClarityMinScore)
+	}
+}
+
+func TestEvaluateTelegramPRDClarityNeedsInput(t *testing.T) {
+	t.Parallel()
+
+	s := telegramPRDSession{
+		ProductName: "Wallet",
+		Stories: []telegramPRDStory{
+			{
+				ID:          "US-001",
+				Title:       "결제 실패 복구",
+				Description: "설명",
+				Role:        "developer",
+				Priority:    10,
+			},
+		},
+		Context: telegramPRDContext{
+			Problem: "",
+		},
+	}
+
+	status := evaluateTelegramPRDClarity(s)
+	if status.ReadyToApply {
+		t.Fatalf("status should not be ready")
+	}
+	if status.NextStage != telegramPRDStageAwaitProblem {
+		t.Fatalf("next stage mismatch: got=%s want=%s", status.NextStage, telegramPRDStageAwaitProblem)
+	}
+}
+
+func TestEvaluateTelegramPRDClarityAssumedValueRequiresRefine(t *testing.T) {
+	t.Parallel()
+
+	s := telegramPRDSession{
+		ProductName: "Wallet",
+		Stories: []telegramPRDStory{
+			{
+				ID:          "US-001",
+				Title:       "결제 실패 복구",
+				Description: "설명",
+				Role:        "developer",
+				Priority:    10,
+			},
+		},
+		Context: telegramPRDContext{
+			Problem:    "[assumed] pain point",
+			Goal:       "목표",
+			InScope:    "범위",
+			OutOfScope: "비범위",
+			Acceptance: "검증",
+		},
+	}
+
+	status := evaluateTelegramPRDClarity(s)
+	if status.ReadyToApply {
+		t.Fatalf("assumed value should keep session below gate")
+	}
+	if status.NextStage != telegramPRDStageAwaitProblem {
+		t.Fatalf("expected first assumed field to be asked again: got=%s", status.NextStage)
 	}
 }
 
@@ -594,6 +721,13 @@ func TestWriteTelegramPRDFile(t *testing.T) {
 	session := telegramPRDSession{
 		ChatID:      100,
 		ProductName: "Wallet",
+		Context: telegramPRDContext{
+			Problem:    "결제 실패율이 높다",
+			Goal:       "실패율 감소",
+			InScope:    "재시도 로직",
+			OutOfScope: "신규 PG",
+			Acceptance: "핵심 시나리오 통과",
+		},
 		Stories: []telegramPRDStory{
 			{ID: "US-001", Title: "결제", Description: "설명", Role: "developer", Priority: 10},
 		},
@@ -607,5 +741,11 @@ func TestWriteTelegramPRDFile(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "\"userStories\"") {
 		t.Fatalf("prd file should include userStories: %s", string(content))
+	}
+	if !strings.Contains(string(content), "\"clarity_score\"") {
+		t.Fatalf("prd file should include clarity_score metadata: %s", string(content))
+	}
+	if !strings.Contains(string(content), "\"problem\"") {
+		t.Fatalf("prd file should include context metadata: %s", string(content))
 	}
 }

@@ -22,7 +22,22 @@ type PRDImportResult struct {
 }
 
 type prdDocument struct {
-	UserStories []prdStory `json:"userStories"`
+	Metadata    prdMetadata `json:"metadata"`
+	UserStories []prdStory  `json:"userStories"`
+}
+
+type prdMetadata struct {
+	Product string            `json:"product"`
+	Context prdContextSummary `json:"context"`
+}
+
+type prdContextSummary struct {
+	Problem     string `json:"problem"`
+	Goal        string `json:"goal"`
+	InScope     string `json:"in_scope"`
+	OutOfScope  string `json:"out_of_scope"`
+	Acceptance  string `json:"acceptance"`
+	Constraints string `json:"constraints"`
 }
 
 type prdStory struct {
@@ -79,6 +94,7 @@ func ImportPRDStories(paths Paths, prdPath, defaultRole string, dryRun bool) (PR
 	}
 
 	sourceFileName := filepath.Base(absSourcePath)
+	globalContext := buildPRDGlobalContext(doc.Metadata)
 	for _, story := range doc.UserStories {
 		result.StoriesTotal++
 
@@ -133,7 +149,7 @@ func ImportPRDStories(paths Paths, prdPath, defaultRole string, dryRun bool) (PR
 		if err != nil {
 			return result, err
 		}
-		if err := appendPRDContext(issuePath, id, priority, sourceFileName, story.Description); err != nil {
+		if err := appendPRDContext(issuePath, id, priority, sourceFileName, story.Description, globalContext); err != nil {
 			return result, err
 		}
 
@@ -238,7 +254,7 @@ func indexStoryIDs(paths Paths) (map[string]string, error) {
 	return out, nil
 }
 
-func appendPRDContext(issuePath, storyID string, priority int, sourceFileName, description string) error {
+func appendPRDContext(issuePath, storyID string, priority int, sourceFileName, description, globalContext string) error {
 	f, err := os.OpenFile(issuePath, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
@@ -259,6 +275,45 @@ func appendPRDContext(issuePath, storyID string, priority int, sourceFileName, d
 	}
 	if desc != "" {
 		_, err = fmt.Fprintf(f, "- story_description: %s\n", desc)
+		if err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(globalContext) != "" {
+		_, err = fmt.Fprintf(f, "- global_context: %s\n", globalContext)
 	}
 	return err
+}
+
+func buildPRDGlobalContext(meta prdMetadata) string {
+	parts := []string{}
+	if v := strings.TrimSpace(meta.Product); v != "" {
+		parts = append(parts, "product="+singleLine(v))
+	}
+	if v := strings.TrimSpace(meta.Context.Problem); v != "" {
+		parts = append(parts, "problem="+singleLine(v))
+	}
+	if v := strings.TrimSpace(meta.Context.Goal); v != "" {
+		parts = append(parts, "goal="+singleLine(v))
+	}
+	if v := strings.TrimSpace(meta.Context.InScope); v != "" {
+		parts = append(parts, "in_scope="+singleLine(v))
+	}
+	if v := strings.TrimSpace(meta.Context.OutOfScope); v != "" {
+		parts = append(parts, "out_of_scope="+singleLine(v))
+	}
+	if v := strings.TrimSpace(meta.Context.Acceptance); v != "" {
+		parts = append(parts, "acceptance="+singleLine(v))
+	}
+	if v := strings.TrimSpace(meta.Context.Constraints); v != "" {
+		parts = append(parts, "constraints="+singleLine(v))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func singleLine(v string) string {
+	v = strings.TrimSpace(v)
+	v = strings.ReplaceAll(v, "\n", " ")
+	v = strings.ReplaceAll(v, "\r", " ")
+	return strings.Join(strings.Fields(v), " ")
 }

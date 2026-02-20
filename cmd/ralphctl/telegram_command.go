@@ -860,8 +860,16 @@ const (
 	telegramPRDStageAwaitStoryDesc    = "await_story_desc"
 	telegramPRDStageAwaitStoryRole    = "await_story_role"
 	telegramPRDStageAwaitStoryPrio    = "await_story_priority"
+	telegramPRDStageAwaitProblem      = "await_problem"
+	telegramPRDStageAwaitGoal         = "await_goal"
+	telegramPRDStageAwaitInScope      = "await_in_scope"
+	telegramPRDStageAwaitOutOfScope   = "await_out_of_scope"
+	telegramPRDStageAwaitAcceptance   = "await_acceptance"
+	telegramPRDStageAwaitConstraints  = "await_constraints"
 	telegramPRDDefaultPriority        = 1000
 	telegramPRDDefaultProductFallback = "Telegram PRD"
+	telegramPRDClarityMinScore        = 80
+	telegramPRDAssumedPrefix          = "[assumed]"
 )
 
 type telegramPRDStory struct {
@@ -876,16 +884,38 @@ type telegramPRDDocument struct {
 	UserStories []telegramPRDStory `json:"userStories"`
 }
 
+type telegramPRDContext struct {
+	Problem     string   `json:"problem,omitempty"`
+	Goal        string   `json:"goal,omitempty"`
+	InScope     string   `json:"in_scope,omitempty"`
+	OutOfScope  string   `json:"out_of_scope,omitempty"`
+	Acceptance  string   `json:"acceptance,omitempty"`
+	Constraints string   `json:"constraints,omitempty"`
+	Assumptions []string `json:"assumptions,omitempty"`
+}
+
 type telegramPRDSession struct {
 	ChatID          int64              `json:"chat_id"`
 	Stage           string             `json:"stage"`
 	ProductName     string             `json:"product_name"`
 	Stories         []telegramPRDStory `json:"stories"`
+	Context         telegramPRDContext `json:"context,omitempty"`
 	DraftTitle      string             `json:"draft_title,omitempty"`
 	DraftDesc       string             `json:"draft_desc,omitempty"`
 	DraftRole       string             `json:"draft_role,omitempty"`
+	Approved        bool               `json:"approved,omitempty"`
 	CreatedAtUTC    string             `json:"created_at_utc,omitempty"`
 	LastUpdatedAtUT string             `json:"last_updated_at_utc,omitempty"`
+}
+
+type telegramPRDClarityStatus struct {
+	Score         int
+	RequiredTotal int
+	RequiredReady int
+	ReadyToApply  bool
+	Missing       []string
+	NextStage     string
+	NextPrompt    string
 }
 
 type telegramPRDSessionStore struct {
@@ -905,6 +935,12 @@ func telegramPRDCommand(controlDir string, paths ralph.Paths, chatID int64, rawA
 		return telegramPRDHelp(), nil
 	case "start":
 		return telegramPRDStartSession(controlDir, chatID, arg)
+	case "refine":
+		return telegramPRDRefineSession(controlDir, chatID)
+	case "score":
+		return telegramPRDScoreSession(controlDir, chatID)
+	case "approve":
+		return telegramPRDApproveSession(controlDir, chatID)
 	case "preview", "status":
 		return telegramPRDPreviewSession(controlDir, chatID)
 	case "save":
@@ -925,6 +961,9 @@ func telegramPRDHelp() string {
 		"",
 		"Commands",
 		"- /prd start [product_name]",
+		"- /prd refine",
+		"- /prd score",
+		"- /prd approve",
 		"- /prd preview",
 		"- /prd save [file]",
 		"- /prd apply [file]",
@@ -932,8 +971,10 @@ func telegramPRDHelp() string {
 		"",
 		"Flow",
 		"1) /prd start",
-		"2) answer prompts (product -> title -> description -> role -> priority)",
-		"3) repeat story title or run /prd preview, /prd save, /prd apply",
+		"2) /prd refine (bot asks missing clarity context)",
+		"3) answer prompts, then add stories (title -> description -> role -> priority)",
+		"4) /prd score or /prd preview",
+		"5) /prd apply",
 	}, "\n")
 }
 
@@ -944,21 +985,83 @@ func telegramPRDStartSession(controlDir string, chatID int64, productName string
 		Stage:           telegramPRDStageAwaitProduct,
 		ProductName:     "",
 		Stories:         []telegramPRDStory{},
+		Context:         telegramPRDContext{},
+		Approved:        false,
 		CreatedAtUTC:    now,
 		LastUpdatedAtUT: now,
 	}
 	productName = strings.TrimSpace(productName)
 	if productName != "" {
 		session.ProductName = productName
-		session.Stage = telegramPRDStageAwaitStoryTitle
+		session.Stage = telegramPRDStageAwaitProblem
 	}
 	if err := telegramUpsertPRDSession(controlDir, session); err != nil {
 		return "", err
 	}
-	if session.Stage == telegramPRDStageAwaitStoryTitle {
-		return fmt.Sprintf("PRD wizard started\n- product: %s\n- next: 첫 user story 제목을 입력하세요", session.ProductName), nil
+	if session.Stage == telegramPRDStageAwaitProblem {
+		return fmt.Sprintf("PRD wizard started\n- product: %s\n- next: /prd refine", session.ProductName), nil
 	}
 	return "PRD wizard started\n- next: 제품/프로젝트 이름을 입력하세요", nil
+}
+
+func telegramPRDRefineSession(controlDir string, chatID int64) (string, error) {
+	session, found, err := telegramLoadPRDSession(controlDir, chatID)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "no active PRD session\n- run: /prd start", nil
+	}
+	status := evaluateTelegramPRDClarity(session)
+	if status.ReadyToApply {
+		session.Stage = telegramPRDStageAwaitStoryTitle
+		session.LastUpdatedAtUT = time.Now().UTC().Format(time.RFC3339)
+		if err := telegramUpsertPRDSession(controlDir, session); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("clarity check complete\n- score: %d/100\n- status: ready_to_apply\n- next: /prd apply", status.Score), nil
+	}
+	if status.NextStage != "" {
+		session.Stage = status.NextStage
+		session.Approved = false
+		session.LastUpdatedAtUT = time.Now().UTC().Format(time.RFC3339)
+		if err := telegramUpsertPRDSession(controlDir, session); err != nil {
+			return "", err
+		}
+	}
+	return formatTelegramPRDClarityQuestion(status), nil
+}
+
+func telegramPRDScoreSession(controlDir string, chatID int64) (string, error) {
+	session, found, err := telegramLoadPRDSession(controlDir, chatID)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "no active PRD session\n- run: /prd start", nil
+	}
+	status := evaluateTelegramPRDClarity(session)
+	return formatTelegramPRDScore(status), nil
+}
+
+func telegramPRDApproveSession(controlDir string, chatID int64) (string, error) {
+	session, found, err := telegramLoadPRDSession(controlDir, chatID)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "no active PRD session\n- run: /prd start", nil
+	}
+	session.Approved = true
+	session.LastUpdatedAtUT = time.Now().UTC().Format(time.RFC3339)
+	if err := telegramUpsertPRDSession(controlDir, session); err != nil {
+		return "", err
+	}
+	status := evaluateTelegramPRDClarity(session)
+	return fmt.Sprintf(
+		"prd apply override enabled\n- score: %d/100\n- note: clarity gate bypassed for this session\n- next: /prd apply",
+		status.Score,
+	), nil
 }
 
 func telegramPRDPreviewSession(controlDir string, chatID int64) (string, error) {
@@ -970,10 +1073,40 @@ func telegramPRDPreviewSession(controlDir string, chatID int64) (string, error) 
 		return "no active PRD session\n- run: /prd start", nil
 	}
 	var b strings.Builder
+	clarity := evaluateTelegramPRDClarity(session)
 	fmt.Fprintln(&b, "PRD session")
 	fmt.Fprintf(&b, "- product: %s\n", valueOrDash(strings.TrimSpace(session.ProductName)))
 	fmt.Fprintf(&b, "- stage: %s\n", session.Stage)
+	fmt.Fprintf(&b, "- approved_override: %t\n", session.Approved)
+	fmt.Fprintf(&b, "- clarity_score: %d/100\n", clarity.Score)
+	fmt.Fprintf(&b, "- clarity_gate: %d\n", telegramPRDClarityMinScore)
+	if clarity.ReadyToApply {
+		fmt.Fprintf(&b, "- clarity_status: ready\n")
+	} else {
+		fmt.Fprintf(&b, "- clarity_status: needs_input (%d/%d required)\n", clarity.RequiredReady, clarity.RequiredTotal)
+	}
 	fmt.Fprintf(&b, "- stories: %d\n", len(session.Stories))
+	if strings.TrimSpace(session.Context.Problem) != "" {
+		fmt.Fprintf(&b, "- problem: %s\n", compactSingleLine(session.Context.Problem, 120))
+	}
+	if strings.TrimSpace(session.Context.Goal) != "" {
+		fmt.Fprintf(&b, "- goal: %s\n", compactSingleLine(session.Context.Goal, 120))
+	}
+	if strings.TrimSpace(session.Context.InScope) != "" {
+		fmt.Fprintf(&b, "- in_scope: %s\n", compactSingleLine(session.Context.InScope, 120))
+	}
+	if strings.TrimSpace(session.Context.OutOfScope) != "" {
+		fmt.Fprintf(&b, "- out_of_scope: %s\n", compactSingleLine(session.Context.OutOfScope, 120))
+	}
+	if strings.TrimSpace(session.Context.Acceptance) != "" {
+		fmt.Fprintf(&b, "- acceptance: %s\n", compactSingleLine(session.Context.Acceptance, 120))
+	}
+	if strings.TrimSpace(session.Context.Constraints) != "" {
+		fmt.Fprintf(&b, "- constraints: %s\n", compactSingleLine(session.Context.Constraints, 120))
+	}
+	if len(session.Context.Assumptions) > 0 {
+		fmt.Fprintf(&b, "- assumptions: %d\n", len(session.Context.Assumptions))
+	}
 	maxRows := len(session.Stories)
 	if maxRows > 10 {
 		maxRows = 10
@@ -984,6 +1117,16 @@ func telegramPRDPreviewSession(controlDir string, chatID int64) (string, error) 
 	}
 	if len(session.Stories) > maxRows {
 		fmt.Fprintf(&b, "- ... and %d more\n", len(session.Stories)-maxRows)
+	}
+	if len(clarity.Missing) > 0 {
+		fmt.Fprintln(&b, "- missing:")
+		for i, m := range clarity.Missing {
+			if i >= 5 {
+				fmt.Fprintf(&b, "  - ... and %d more\n", len(clarity.Missing)-i)
+				break
+			}
+			fmt.Fprintf(&b, "  - %s\n", m)
+		}
 	}
 	fmt.Fprintf(&b, "- next: %s\n", telegramPRDStagePrompt(session.Stage))
 	return b.String(), nil
@@ -1021,6 +1164,17 @@ func telegramPRDApplySession(controlDir string, paths ralph.Paths, chatID int64,
 	if len(session.Stories) == 0 {
 		return "", fmt.Errorf("no stories in session yet")
 	}
+	clarity := evaluateTelegramPRDClarity(session)
+	if !clarity.ReadyToApply && !session.Approved {
+		return strings.Join([]string{
+			"prd apply blocked",
+			fmt.Sprintf("- clarity_score: %d/100", clarity.Score),
+			fmt.Sprintf("- clarity_gate: %d", telegramPRDClarityMinScore),
+			"- reason: missing required context",
+			"- next: /prd refine",
+			"- optional_override: /prd approve",
+		}, "\n"), nil
+	}
 	targetPath, err := resolveTelegramPRDFilePath(paths, chatID, rawPath)
 	if err != nil {
 		return "", err
@@ -1036,12 +1190,14 @@ func telegramPRDApplySession(controlDir string, paths ralph.Paths, chatID int64,
 		return "", err
 	}
 	return fmt.Sprintf(
-		"prd applied\n- file: %s\n- stories_total: %d\n- imported: %d\n- skipped_existing: %d\n- skipped_invalid: %d\n- next: /status",
+		"prd applied\n- file: %s\n- stories_total: %d\n- imported: %d\n- skipped_existing: %d\n- skipped_invalid: %d\n- clarity_score: %d/100\n- override_used: %t\n- next: /status",
 		targetPath,
 		result.StoriesTotal,
 		result.Imported,
 		result.SkippedExisting,
 		result.SkippedInvalid,
+		clarity.Score,
+		session.Approved && !clarity.ReadyToApply,
 	), nil
 }
 
@@ -1074,6 +1230,7 @@ func telegramPRDHandleInput(controlDir string, paths ralph.Paths, chatID int64, 
 
 func advanceTelegramPRDSession(session telegramPRDSession, input string) (telegramPRDSession, string, error) {
 	session.LastUpdatedAtUT = time.Now().UTC().Format(time.RFC3339)
+	session.Approved = false
 	input = strings.TrimSpace(input)
 	if input == "" {
 		return session, telegramPRDStagePrompt(session.Stage), nil
@@ -1082,8 +1239,42 @@ func advanceTelegramPRDSession(session telegramPRDSession, input string) (telegr
 	switch session.Stage {
 	case telegramPRDStageAwaitProduct:
 		session.ProductName = input
-		session.Stage = telegramPRDStageAwaitStoryTitle
-		return session, fmt.Sprintf("product set: %s\n- next: 첫 user story 제목을 입력하세요", session.ProductName), nil
+		status := evaluateTelegramPRDClarity(session)
+		session.Stage = status.NextStage
+		if session.Stage == "" {
+			session.Stage = telegramPRDStageAwaitStoryTitle
+		}
+		return session, fmt.Sprintf("product set: %s\n- next: /prd refine", session.ProductName), nil
+
+	case telegramPRDStageAwaitProblem:
+		session.Context.Problem = normalizeTelegramPRDContextAnswer(input, "현재 기능/운영상 pain point는 명시되지 않음")
+		recordTelegramPRDAssumption(&session.Context, "problem", session.Context.Problem)
+		return advanceTelegramPRDRefineFlow(session)
+
+	case telegramPRDStageAwaitGoal:
+		session.Context.Goal = normalizeTelegramPRDContextAnswer(input, "단기 목표는 첫 동작 가능한 자동화 루프 확보")
+		recordTelegramPRDAssumption(&session.Context, "goal", session.Context.Goal)
+		return advanceTelegramPRDRefineFlow(session)
+
+	case telegramPRDStageAwaitInScope:
+		session.Context.InScope = normalizeTelegramPRDContextAnswer(input, "초기 릴리즈에서는 핵심 사용자 흐름만 포함")
+		recordTelegramPRDAssumption(&session.Context, "in_scope", session.Context.InScope)
+		return advanceTelegramPRDRefineFlow(session)
+
+	case telegramPRDStageAwaitOutOfScope:
+		session.Context.OutOfScope = normalizeTelegramPRDContextAnswer(input, "대규모 리팩터/새 인프라 구축은 제외")
+		recordTelegramPRDAssumption(&session.Context, "out_of_scope", session.Context.OutOfScope)
+		return advanceTelegramPRDRefineFlow(session)
+
+	case telegramPRDStageAwaitAcceptance:
+		session.Context.Acceptance = normalizeTelegramPRDContextAnswer(input, "주요 시나리오 성공 + 실패 시 복구 경로 확인")
+		recordTelegramPRDAssumption(&session.Context, "acceptance", session.Context.Acceptance)
+		return advanceTelegramPRDRefineFlow(session)
+
+	case telegramPRDStageAwaitConstraints:
+		session.Context.Constraints = normalizeTelegramPRDContextAnswer(input, "시간/리소스 제약은 일반적인 단일 개발자 환경 가정")
+		recordTelegramPRDAssumption(&session.Context, "constraints", session.Context.Constraints)
+		return advanceTelegramPRDRefineFlow(session)
 
 	case telegramPRDStageAwaitStoryTitle:
 		session.DraftTitle = input
@@ -1125,19 +1316,255 @@ func advanceTelegramPRDSession(session telegramPRDSession, input string) (telegr
 		session.DraftDesc = ""
 		session.DraftRole = ""
 		session.Stage = telegramPRDStageAwaitStoryTitle
+		clarity := evaluateTelegramPRDClarity(session)
+		next := "다음 story 제목 입력 또는 /prd preview /prd save /prd apply"
+		if !clarity.ReadyToApply {
+			next = "/prd refine (부족 컨텍스트 질문 진행) 또는 다음 story 제목 입력"
+		}
 		return session, fmt.Sprintf(
-			"story added\n- id: %s\n- title: %s\n- role: %s\n- priority: %d\n- stories_total: %d\n- next: 다음 story 제목 입력 또는 /prd preview /prd save /prd apply",
+			"story added\n- id: %s\n- title: %s\n- role: %s\n- priority: %d\n- stories_total: %d\n- clarity_score: %d/100\n- next: %s",
 			story.ID,
 			compactSingleLine(story.Title, 90),
 			story.Role,
 			story.Priority,
 			len(session.Stories),
+			clarity.Score,
+			next,
 		), nil
 
 	default:
-		session.Stage = telegramPRDStageAwaitProduct
-		return session, "session stage reset\n- next: 제품/프로젝트 이름을 입력하세요", nil
+		status := evaluateTelegramPRDClarity(session)
+		session.Stage = status.NextStage
+		if session.Stage == "" {
+			session.Stage = telegramPRDStageAwaitProduct
+		}
+		return session, "session stage reset\n- next: /prd refine", nil
 	}
+}
+
+func advanceTelegramPRDRefineFlow(session telegramPRDSession) (telegramPRDSession, string, error) {
+	status := evaluateTelegramPRDClarity(session)
+	if status.ReadyToApply {
+		session.Stage = telegramPRDStageAwaitStoryTitle
+		return session, fmt.Sprintf(
+			"clarity updated\n- score: %d/100\n- status: ready_to_apply\n- next: story 추가 또는 /prd apply",
+			status.Score,
+		), nil
+	}
+	session.Stage = status.NextStage
+	if session.Stage == "" {
+		session.Stage = telegramPRDStageAwaitStoryTitle
+	}
+	return session, formatTelegramPRDClarityQuestion(status), nil
+}
+
+func normalizeTelegramPRDContextAnswer(input, defaultAssumption string) string {
+	v := strings.TrimSpace(input)
+	if v == "" {
+		return ""
+	}
+	lower := strings.ToLower(v)
+	if lower == "skip" || lower == "default" || lower == "n/a" {
+		return fmt.Sprintf("%s %s", telegramPRDAssumedPrefix, strings.TrimSpace(defaultAssumption))
+	}
+	return v
+}
+
+func recordTelegramPRDAssumption(ctx *telegramPRDContext, field, value string) {
+	if ctx == nil {
+		return
+	}
+	if !isTelegramPRDAssumedValue(value) {
+		return
+	}
+	entry := fmt.Sprintf("%s: %s", field, strings.TrimSpace(strings.TrimPrefix(value, telegramPRDAssumedPrefix)))
+	for _, existing := range ctx.Assumptions {
+		if existing == entry {
+			return
+		}
+	}
+	ctx.Assumptions = append(ctx.Assumptions, entry)
+}
+
+func isTelegramPRDAssumedValue(value string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), strings.ToLower(telegramPRDAssumedPrefix))
+}
+
+func evaluateTelegramPRDClarity(session telegramPRDSession) telegramPRDClarityStatus {
+	type requiredField struct {
+		Label      string
+		Value      string
+		Stage      string
+		Prompt     string
+		Assumption string
+	}
+	required := []requiredField{
+		{
+			Label:      "problem statement",
+			Value:      session.Context.Problem,
+			Stage:      telegramPRDStageAwaitProblem,
+			Prompt:     "문제 정의를 입력하세요 (왜 이 작업이 필요한가?)",
+			Assumption: "skip/default 입력 시: 현재 운영 pain point 해결이 우선이라고 가정",
+		},
+		{
+			Label:      "goal",
+			Value:      session.Context.Goal,
+			Stage:      telegramPRDStageAwaitGoal,
+			Prompt:     "목표를 입력하세요 (완료 기준 한 줄)",
+			Assumption: "skip/default 입력 시: 첫 안정 운영 가능 상태 도달로 가정",
+		},
+		{
+			Label:      "in-scope",
+			Value:      session.Context.InScope,
+			Stage:      telegramPRDStageAwaitInScope,
+			Prompt:     "포함 범위를 입력하세요 (이번 사이클에서 반드시 할 것)",
+			Assumption: "skip/default 입력 시: 핵심 사용자 흐름 중심으로 가정",
+		},
+		{
+			Label:      "out-of-scope",
+			Value:      session.Context.OutOfScope,
+			Stage:      telegramPRDStageAwaitOutOfScope,
+			Prompt:     "제외 범위를 입력하세요 (이번 사이클에서 하지 않을 것)",
+			Assumption: "skip/default 입력 시: 대규모 리팩터/인프라 변경 제외로 가정",
+		},
+		{
+			Label:      "acceptance criteria",
+			Value:      session.Context.Acceptance,
+			Stage:      telegramPRDStageAwaitAcceptance,
+			Prompt:     "수용 기준을 입력하세요 (검증 가능한 기준)",
+			Assumption: "skip/default 입력 시: 핵심 시나리오 성공 + 회귀 없음으로 가정",
+		},
+	}
+
+	score := 0
+	missing := []string{}
+	requiredReady := 0
+	assumedRequired := 0
+	nextStage := ""
+	nextPrompt := ""
+	firstAssumedStage := ""
+	firstAssumedLabel := ""
+
+	product := strings.TrimSpace(session.ProductName)
+	if product != "" {
+		score += 10
+	} else {
+		missing = append(missing, "product name")
+		nextStage = telegramPRDStageAwaitProduct
+		nextPrompt = "제품/프로젝트 이름을 입력하세요"
+	}
+
+	for _, f := range required {
+		v := strings.TrimSpace(f.Value)
+		if v == "" {
+			missing = append(missing, f.Label)
+			if nextStage == "" {
+				nextStage = f.Stage
+				nextPrompt = fmt.Sprintf("%s\n- %s", f.Prompt, f.Assumption)
+			}
+			continue
+		}
+		requiredReady++
+		if isTelegramPRDAssumedValue(v) {
+			score += 9
+			assumedRequired++
+			if firstAssumedStage == "" {
+				firstAssumedStage = f.Stage
+				firstAssumedLabel = f.Label
+			}
+		} else {
+			score += 14
+		}
+	}
+
+	storyCount := len(session.Stories)
+	if storyCount == 0 {
+		missing = append(missing, "at least 1 user story")
+		if nextStage == "" {
+			nextStage = telegramPRDStageAwaitStoryTitle
+			nextPrompt = "첫 user story 제목을 입력하세요"
+		}
+	} else {
+		score += 20
+		if storyCount >= 3 {
+			score += 4
+		}
+	}
+
+	if strings.TrimSpace(session.Context.Constraints) != "" {
+		if isTelegramPRDAssumedValue(session.Context.Constraints) {
+			score += 4
+		} else {
+			score += 8
+		}
+	}
+
+	if score > 100 {
+		score = 100
+	}
+
+	ready := score >= telegramPRDClarityMinScore && requiredReady == len(required) && storyCount > 0 && assumedRequired == 0
+	if !ready && nextStage == "" && firstAssumedStage != "" {
+		nextStage = firstAssumedStage
+		nextPrompt = fmt.Sprintf("%s의 실제 값을 입력하세요 (현재 가정값으로 설정됨)", firstAssumedLabel)
+		missing = append([]string{"replace assumed value: " + firstAssumedLabel}, missing...)
+	}
+	if ready {
+		nextStage = ""
+		nextPrompt = ""
+	}
+
+	return telegramPRDClarityStatus{
+		Score:         score,
+		RequiredTotal: len(required),
+		RequiredReady: requiredReady,
+		ReadyToApply:  ready,
+		Missing:       missing,
+		NextStage:     nextStage,
+		NextPrompt:    nextPrompt,
+	}
+}
+
+func formatTelegramPRDClarityQuestion(status telegramPRDClarityStatus) string {
+	if status.ReadyToApply {
+		return fmt.Sprintf("clarity check complete\n- score: %d/100\n- next: /prd apply", status.Score)
+	}
+	lines := []string{
+		"prd refine question",
+		fmt.Sprintf("- score: %d/100 (gate=%d)", status.Score, telegramPRDClarityMinScore),
+	}
+	if status.NextPrompt != "" {
+		lines = append(lines, "- ask: "+status.NextPrompt)
+	}
+	if len(status.Missing) > 0 {
+		lines = append(lines, "- missing_top: "+status.Missing[0])
+	}
+	lines = append(lines, "- hint: 답변이 애매하면 `skip` 또는 `default` 입력")
+	return strings.Join(lines, "\n")
+}
+
+func formatTelegramPRDScore(status telegramPRDClarityStatus) string {
+	lines := []string{
+		"prd clarity score",
+		fmt.Sprintf("- score: %d/100", status.Score),
+		fmt.Sprintf("- gate: %d", telegramPRDClarityMinScore),
+		fmt.Sprintf("- required_ready: %d/%d", status.RequiredReady, status.RequiredTotal),
+	}
+	if status.ReadyToApply {
+		lines = append(lines, "- status: ready_to_apply")
+		lines = append(lines, "- next: /prd apply")
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines, "- status: needs_input")
+	if len(status.Missing) > 0 {
+		preview := strings.Join(status.Missing, ", ")
+		if len(preview) > 150 {
+			preview = compactSingleLine(preview, 150)
+		}
+		lines = append(lines, "- missing: "+preview)
+	}
+	lines = append(lines, "- next: /prd refine")
+	return strings.Join(lines, "\n")
 }
 
 func parseTelegramPRDStoryRole(input string) (string, error) {
@@ -1174,6 +1601,18 @@ func telegramPRDStagePrompt(stage string) string {
 	switch stage {
 	case telegramPRDStageAwaitProduct:
 		return "제품/프로젝트 이름을 입력하세요"
+	case telegramPRDStageAwaitProblem:
+		return "문제 정의를 입력하세요 (왜 이 작업이 필요한가?)"
+	case telegramPRDStageAwaitGoal:
+		return "목표를 입력하세요 (완료 기준 한 줄)"
+	case telegramPRDStageAwaitInScope:
+		return "포함 범위를 입력하세요 (이번 사이클에서 반드시 할 것)"
+	case telegramPRDStageAwaitOutOfScope:
+		return "제외 범위를 입력하세요 (이번 사이클에서 하지 않을 것)"
+	case telegramPRDStageAwaitAcceptance:
+		return "수용 기준을 입력하세요 (검증 가능한 기준)"
+	case telegramPRDStageAwaitConstraints:
+		return "제약 사항을 입력하세요 (옵션, skip 가능)"
 	case telegramPRDStageAwaitStoryTitle:
 		return "story 제목을 입력하세요"
 	case telegramPRDStageAwaitStoryDesc:
@@ -1293,6 +1732,7 @@ func writeTelegramPRDFile(path string, session telegramPRDSession) error {
 	if product == "" {
 		product = telegramPRDDefaultProductFallback
 	}
+	clarity := evaluateTelegramPRDClarity(session)
 	stories := make([]telegramPRDStory, 0, len(session.Stories))
 	for _, story := range session.Stories {
 		s := story
@@ -1312,6 +1752,17 @@ func writeTelegramPRDFile(path string, session telegramPRDSession) error {
 			"product":          product,
 			"source":           "telegram-prd-wizard",
 			"generated_at_utc": time.Now().UTC().Format(time.RFC3339),
+			"clarity_score":    clarity.Score,
+			"clarity_gate":     telegramPRDClarityMinScore,
+			"context": map[string]any{
+				"problem":      strings.TrimSpace(session.Context.Problem),
+				"goal":         strings.TrimSpace(session.Context.Goal),
+				"in_scope":     strings.TrimSpace(session.Context.InScope),
+				"out_of_scope": strings.TrimSpace(session.Context.OutOfScope),
+				"acceptance":   strings.TrimSpace(session.Context.Acceptance),
+				"constraints":  strings.TrimSpace(session.Context.Constraints),
+				"assumptions":  session.Context.Assumptions,
+			},
 		},
 		"userStories": telegramPRDDocument{
 			UserStories: stories,
@@ -1414,6 +1865,7 @@ func buildTelegramHelp(allowControl bool) string {
 			"",
 			"PRD Wizard",
 			"- /prd help",
+			"- /prd start | /prd refine | /prd score | /prd apply | /prd approve",
 		)
 	} else {
 		lines = append(lines, "", "Control", "- disabled (--allow-control=false)")
@@ -1439,6 +1891,7 @@ func formatStatusForTelegram(st ralph.Status) string {
 		fmt.Fprintf(&b, "- No queued work\n")
 		fmt.Fprintf(&b, "- Add issue: ./ralph new developer \"<title>\"\n")
 		fmt.Fprintf(&b, "- Import PRD: ./ralph import-prd --file prd.json\n")
+		fmt.Fprintf(&b, "- Telegram PRD Wizard: /prd start -> /prd refine -> /prd apply\n")
 	}
 	if st.LastProfileReloadAt != "" || st.ProfileReloadCount > 0 {
 		fmt.Fprintf(&b, "\nRuntime\n")
@@ -1714,7 +2167,7 @@ func buildStatusAlerts(prev, current ralph.Status, retryThreshold, permThreshold
 	}
 	if ralph.IsInputRequiredStatus(current) && !ralph.IsInputRequiredStatus(prev) {
 		out = append(out, fmt.Sprintf(
-			"[ralph alert][input_required]\n- project: %s\n- message: no queued work. add issue (`./ralph new ...`) or import PRD (`./ralph import-prd --file prd.json`)",
+			"[ralph alert][input_required]\n- project: %s\n- message: no queued work. add issue (`./ralph new ...`) or run PRD wizard (`/prd start -> /prd refine -> /prd apply`)",
 			project,
 		))
 	}
