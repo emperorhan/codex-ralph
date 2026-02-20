@@ -42,8 +42,24 @@ jobs:
           echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
           echo "prerelease=${PRERELEASE}" >> "${GITHUB_OUTPUT}"
 
-  build:
+  test:
     needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run go test
+        run: |
+          set -euo pipefail
+          go test ./...
+
+  build:
+    needs: [prepare, test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -126,7 +127,15 @@ func RunTelegramBot(ctx context.Context, opts TelegramBotOptions) error {
 	chatIDs := sortedTelegramChatIDs(opts.AllowedChatIDs)
 	unauthorizedLogCooldown := 60 * time.Second
 	lastUnauthorizedLogAt := map[string]time.Time{}
-	commandSlots := make(chan struct{}, commandConcurrency)
+	dispatcher := newTelegramCommandDispatcher(ctx, telegramCommandDispatcherOptions{
+		CommandTimeout: time.Duration(commandTimeoutSec) * time.Second,
+		Concurrency:    commandConcurrency,
+		OnCommand:      opts.OnCommand,
+		Client:         client,
+		BaseURL:        baseURL,
+		Token:          token,
+		Out:            out,
+	})
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -193,18 +202,7 @@ func RunTelegramBot(ctx context.Context, opts TelegramBotOptions) error {
 				continue
 			}
 
-			dispatchTelegramCommand(
-				ctx,
-				commandSlots,
-				time.Duration(commandTimeoutSec)*time.Second,
-				opts.OnCommand,
-				client,
-				baseURL,
-				token,
-				chatID,
-				text,
-				out,
-			)
+			dispatcher.Submit(chatID, text)
 		}
 
 		if nextOffset > offset {
@@ -216,57 +214,166 @@ func RunTelegramBot(ctx context.Context, opts TelegramBotOptions) error {
 	}
 }
 
-func dispatchTelegramCommand(
-	ctx context.Context,
-	commandSlots chan struct{},
-	commandTimeout time.Duration,
-	onCommand TelegramCommandHandler,
-	client *http.Client,
-	baseURL, token string,
-	chatID int64,
-	text string,
-	out io.Writer,
-) {
-	select {
-	case commandSlots <- struct{}{}:
-	case <-ctx.Done():
-		return
-	default:
-		busy := "system busy: processing previous commands. please retry in a few seconds."
-		if err := telegramSendMessage(ctx, client, baseURL, token, chatID, busy); err != nil {
-			fmt.Fprintf(out, "[telegram] warning: queue full and busy notice send failed chat=%d: %v\n", chatID, err)
-		}
-		fmt.Fprintf(out, "[telegram] warning: command queue full; dropped chat=%d text=%q\n", chatID, compactTelegramError(text))
+type telegramCommandDispatcherOptions struct {
+	CommandTimeout time.Duration
+	Concurrency    int
+	OnCommand      TelegramCommandHandler
+	Client         *http.Client
+	BaseURL        string
+	Token          string
+	Out            io.Writer
+}
+
+type telegramCommandDispatcher struct {
+	ctx            context.Context
+	commandTimeout time.Duration
+	slots          chan struct{}
+	onCommand      TelegramCommandHandler
+	client         *http.Client
+	baseURL        string
+	token          string
+	out            io.Writer
+
+	mu     sync.Mutex
+	queues map[int64]*telegramChatCommandQueue
+}
+
+type telegramChatCommandQueue struct {
+	mu     sync.Mutex
+	items  []string
+	notify chan struct{}
+}
+
+func newTelegramCommandDispatcher(ctx context.Context, opts telegramCommandDispatcherOptions) *telegramCommandDispatcher {
+	concurrency := opts.Concurrency
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	timeout := opts.CommandTimeout
+	if timeout <= 0 {
+		timeout = 300 * time.Second
+	}
+	return &telegramCommandDispatcher{
+		ctx:            ctx,
+		commandTimeout: timeout,
+		slots:          make(chan struct{}, concurrency),
+		onCommand:      opts.OnCommand,
+		client:         opts.Client,
+		baseURL:        opts.BaseURL,
+		token:          opts.Token,
+		out:            opts.Out,
+		queues:         map[int64]*telegramChatCommandQueue{},
+	}
+}
+
+func (d *telegramCommandDispatcher) Submit(chatID int64, text string) {
+	if chatID == 0 || strings.TrimSpace(text) == "" {
 		return
 	}
+	q := d.getOrCreateQueue(chatID)
+	q.enqueue(text)
+}
 
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				fmt.Fprintf(out, "[telegram] warning: command panic chat=%d: %v\n", chatID, r)
-			}
-			<-commandSlots
-		}()
+func (d *telegramCommandDispatcher) getOrCreateQueue(chatID int64) *telegramChatCommandQueue {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
-		cmdCtx, cancel := context.WithTimeout(ctx, commandTimeout)
-		defer cancel()
+	if q, ok := d.queues[chatID]; ok {
+		return q
+	}
+	q := &telegramChatCommandQueue{
+		notify: make(chan struct{}, 1),
+	}
+	d.queues[chatID] = q
+	go d.runChatWorker(chatID, q)
+	return q
+}
 
-		reply, cmdErr := onCommand(cmdCtx, chatID, text)
-		if cmdErr != nil {
-			reply = "error: " + compactTelegramError(cmdErr.Error())
-		}
-		reply = strings.TrimSpace(reply)
-		if reply == "" {
+func (d *telegramCommandDispatcher) removeQueue(chatID int64, q *telegramChatCommandQueue) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	current, ok := d.queues[chatID]
+	if ok && current == q {
+		delete(d.queues, chatID)
+	}
+}
+
+func (d *telegramCommandDispatcher) runChatWorker(chatID int64, q *telegramChatCommandQueue) {
+	defer d.removeQueue(chatID, q)
+
+	for {
+		text, ok := q.dequeue(d.ctx)
+		if !ok {
 			return
 		}
 
-		for _, chunk := range splitTelegramMessage(reply, 3500) {
-			if sendErr := telegramSendMessage(cmdCtx, client, baseURL, token, chatID, chunk); sendErr != nil {
-				fmt.Fprintf(out, "[telegram] warning: sendMessage failed chat=%d: %v\n", chatID, sendErr)
-				break
-			}
+		select {
+		case d.slots <- struct{}{}:
+		case <-d.ctx.Done():
+			return
+		}
+		d.execute(chatID, text)
+		<-d.slots
+	}
+}
+
+func (d *telegramCommandDispatcher) execute(chatID int64, text string) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(d.out, "[telegram] warning: command panic chat=%d: %v\n", chatID, r)
 		}
 	}()
+
+	cmdCtx, cancel := context.WithTimeout(d.ctx, d.commandTimeout)
+	defer cancel()
+
+	reply, cmdErr := d.onCommand(cmdCtx, chatID, text)
+	if cmdErr != nil {
+		reply = "error: " + compactTelegramError(cmdErr.Error())
+	}
+	reply = strings.TrimSpace(reply)
+	if reply == "" {
+		return
+	}
+
+	sendCtx, sendCancel := context.WithTimeout(d.ctx, 20*time.Second)
+	defer sendCancel()
+	for _, chunk := range splitTelegramMessage(reply, 3500) {
+		if sendErr := telegramSendMessage(sendCtx, d.client, d.baseURL, d.token, chatID, chunk); sendErr != nil {
+			fmt.Fprintf(d.out, "[telegram] warning: sendMessage failed chat=%d: %v\n", chatID, sendErr)
+			break
+		}
+	}
+}
+
+func (q *telegramChatCommandQueue) enqueue(text string) {
+	q.mu.Lock()
+	q.items = append(q.items, text)
+	q.mu.Unlock()
+
+	select {
+	case q.notify <- struct{}{}:
+	default:
+	}
+}
+
+func (q *telegramChatCommandQueue) dequeue(ctx context.Context) (string, bool) {
+	for {
+		q.mu.Lock()
+		if len(q.items) > 0 {
+			item := q.items[0]
+			q.items = q.items[1:]
+			q.mu.Unlock()
+			return item, true
+		}
+		q.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return "", false
+		case <-q.notify:
+		}
+	}
 }
 
 func sortedTelegramChatIDs(chats map[int64]struct{}) []int64 {

@@ -174,6 +174,8 @@ func TestSaveLoadTelegramCLIConfig(t *testing.T) {
 		NotifyIntervalSec:         45,
 		NotifyRetryThreshold:      3,
 		NotifyPermStreakThreshold: 5,
+		CommandTimeoutSec:         180,
+		CommandConcurrency:        6,
 	}
 	if err := saveTelegramCLIConfig(path, want); err != nil {
 		t.Fatalf("saveTelegramCLIConfig failed: %v", err)
@@ -209,6 +211,12 @@ func TestSaveLoadTelegramCLIConfig(t *testing.T) {
 	}
 	if got.NotifyPermStreakThreshold != want.NotifyPermStreakThreshold {
 		t.Fatalf("notify perm mismatch: got=%d want=%d", got.NotifyPermStreakThreshold, want.NotifyPermStreakThreshold)
+	}
+	if got.CommandTimeoutSec != want.CommandTimeoutSec {
+		t.Fatalf("command timeout mismatch: got=%d want=%d", got.CommandTimeoutSec, want.CommandTimeoutSec)
+	}
+	if got.CommandConcurrency != want.CommandConcurrency {
+		t.Fatalf("command concurrency mismatch: got=%d want=%d", got.CommandConcurrency, want.CommandConcurrency)
 	}
 
 	info, err := os.Stat(path)

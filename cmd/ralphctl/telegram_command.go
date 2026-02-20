@@ -25,7 +25,7 @@ import (
 func runTelegramCommand(controlDir string, paths ralph.Paths, args []string) error {
 	usage := func() {
 		fmt.Fprintln(os.Stderr, "Usage: ralphctl --control-dir DIR --project-dir DIR telegram <run|setup|stop|status|tail> [flags]")
-		fmt.Fprintln(os.Stderr, "Env: RALPH_TELEGRAM_BOT_TOKEN, RALPH_TELEGRAM_CHAT_IDS, RALPH_TELEGRAM_USER_IDS, RALPH_TELEGRAM_ALLOW_CONTROL, RALPH_TELEGRAM_NOTIFY, RALPH_TELEGRAM_NOTIFY_SCOPE")
+		fmt.Fprintln(os.Stderr, "Env: RALPH_TELEGRAM_BOT_TOKEN, RALPH_TELEGRAM_CHAT_IDS, RALPH_TELEGRAM_USER_IDS, RALPH_TELEGRAM_ALLOW_CONTROL, RALPH_TELEGRAM_NOTIFY, RALPH_TELEGRAM_NOTIFY_SCOPE, RALPH_TELEGRAM_COMMAND_TIMEOUT_SEC, RALPH_TELEGRAM_COMMAND_CONCURRENCY")
 	}
 	if len(args) == 0 {
 		usage()
@@ -68,6 +68,8 @@ func runTelegramRunCommand(controlDir string, paths ralph.Paths, args []string) 
 	notifyIntervalSec := fs.Int("notify-interval-sec", envIntDefault("RALPH_TELEGRAM_NOTIFY_INTERVAL_SEC", cfg.NotifyIntervalSec), "status poll interval for notify alerts")
 	notifyRetryThreshold := fs.Int("notify-retry-threshold", envIntDefault("RALPH_TELEGRAM_NOTIFY_RETRY_THRESHOLD", cfg.NotifyRetryThreshold), "codex retry alert threshold")
 	notifyPermStreakThreshold := fs.Int("notify-perm-streak-threshold", envIntDefault("RALPH_TELEGRAM_NOTIFY_PERM_STREAK_THRESHOLD", cfg.NotifyPermStreakThreshold), "permission streak alert threshold")
+	commandTimeoutSec := fs.Int("command-timeout-sec", envIntDefault("RALPH_TELEGRAM_COMMAND_TIMEOUT_SEC", cfg.CommandTimeoutSec), "timeout seconds per telegram command")
+	commandConcurrency := fs.Int("command-concurrency", envIntDefault("RALPH_TELEGRAM_COMMAND_CONCURRENCY", cfg.CommandConcurrency), "max concurrent command workers across chats")
 	pollTimeoutSec := fs.Int("poll-timeout-sec", 30, "telegram getUpdates timeout (seconds)")
 	offsetFile := fs.String("offset-file", filepath.Join(controlDir, "telegram.offset"), "telegram update offset file")
 	if err := fs.Parse(args); err != nil {
@@ -100,6 +102,12 @@ func runTelegramRunCommand(controlDir string, paths ralph.Paths, args []string) 
 	}
 	if *notifyIntervalSec <= 0 {
 		return fmt.Errorf("--notify-interval-sec must be > 0")
+	}
+	if *commandTimeoutSec <= 0 {
+		return fmt.Errorf("--command-timeout-sec must be > 0")
+	}
+	if *commandConcurrency <= 0 {
+		return fmt.Errorf("--command-concurrency must be > 0")
 	}
 	resolvedNotifyScope, err := normalizeNotifyScope(*notifyScope)
 	if err != nil {
@@ -141,6 +149,8 @@ func runTelegramRunCommand(controlDir string, paths ralph.Paths, args []string) 
 	fmt.Printf("Notify Every:  %ds\n", *notifyIntervalSec)
 	fmt.Printf("Retry Alert:   %d\n", *notifyRetryThreshold)
 	fmt.Printf("Perm Alert:    %d\n", *notifyPermStreakThreshold)
+	fmt.Printf("Cmd Timeout:   %ds\n", *commandTimeoutSec)
+	fmt.Printf("Cmd Workers:   %d\n", *commandConcurrency)
 	fmt.Printf("Allowed Chats: %d\n", len(allowedChatIDs))
 	if len(allowedUserIDs) > 0 {
 		fmt.Printf("Allowed Users: %d\n", len(allowedUserIDs))
@@ -157,15 +167,17 @@ func runTelegramRunCommand(controlDir string, paths ralph.Paths, args []string) 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return ralph.RunTelegramBot(ctx, ralph.TelegramBotOptions{
-		Token:             *token,
-		AllowedChatIDs:    allowedChatIDs,
-		AllowedUserIDs:    allowedUserIDs,
-		PollTimeoutSec:    *pollTimeoutSec,
-		NotifyIntervalSec: *notifyIntervalSec,
-		OffsetFile:        *offsetFile,
-		Out:               os.Stdout,
-		OnCommand:         telegramCommandHandler(controlDir, paths, *allowControl),
-		OnNotifyTick:      notifyHandler,
+		Token:              *token,
+		AllowedChatIDs:     allowedChatIDs,
+		AllowedUserIDs:     allowedUserIDs,
+		PollTimeoutSec:     *pollTimeoutSec,
+		NotifyIntervalSec:  *notifyIntervalSec,
+		CommandTimeoutSec:  *commandTimeoutSec,
+		CommandConcurrency: *commandConcurrency,
+		OffsetFile:         *offsetFile,
+		Out:                os.Stdout,
+		OnCommand:          telegramCommandHandler(controlDir, paths, *allowControl),
+		OnNotifyTick:       notifyHandler,
 	})
 }
 
@@ -243,6 +255,8 @@ func runTelegramSetupCommand(controlDir string, args []string) error {
 	defaultNotifyInterval := envIntDefault("RALPH_TELEGRAM_NOTIFY_INTERVAL_SEC", cfg.NotifyIntervalSec)
 	defaultNotifyRetry := envIntDefault("RALPH_TELEGRAM_NOTIFY_RETRY_THRESHOLD", cfg.NotifyRetryThreshold)
 	defaultNotifyPerm := envIntDefault("RALPH_TELEGRAM_NOTIFY_PERM_STREAK_THRESHOLD", cfg.NotifyPermStreakThreshold)
+	defaultCommandTimeout := envIntDefault("RALPH_TELEGRAM_COMMAND_TIMEOUT_SEC", cfg.CommandTimeoutSec)
+	defaultCommandConcurrency := envIntDefault("RALPH_TELEGRAM_COMMAND_CONCURRENCY", cfg.CommandConcurrency)
 
 	fs := flag.NewFlagSet("telegram setup", flag.ContinueOnError)
 	configFileFlag := fs.String("config-file", configFile, "telegram config file path")
@@ -256,6 +270,8 @@ func runTelegramSetupCommand(controlDir string, args []string) error {
 	notifyIntervalFlag := fs.Int("notify-interval-sec", defaultNotifyInterval, "notify interval seconds")
 	notifyRetryFlag := fs.Int("notify-retry-threshold", defaultNotifyRetry, "notify retry threshold")
 	notifyPermFlag := fs.Int("notify-perm-streak-threshold", defaultNotifyPerm, "notify permission streak threshold")
+	commandTimeoutFlag := fs.Int("command-timeout-sec", defaultCommandTimeout, "timeout seconds per telegram command")
+	commandConcurrencyFlag := fs.Int("command-concurrency", defaultCommandConcurrency, "max concurrent command workers across chats")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -270,6 +286,8 @@ func runTelegramSetupCommand(controlDir string, args []string) error {
 		NotifyIntervalSec:         *notifyIntervalFlag,
 		NotifyRetryThreshold:      *notifyRetryFlag,
 		NotifyPermStreakThreshold: *notifyPermFlag,
+		CommandTimeoutSec:         *commandTimeoutFlag,
+		CommandConcurrency:        *commandConcurrencyFlag,
 	}
 	configFile = strings.TrimSpace(*configFileFlag)
 
@@ -338,6 +356,22 @@ func runTelegramSetupCommand(controlDir string, args []string) error {
 		if v, convErr := strconv.Atoi(strings.TrimSpace(permInput)); convErr == nil {
 			final.NotifyPermStreakThreshold = v
 		}
+
+		timeoutInput, err := promptFleetInput(reader, "Command timeout sec", strconv.Itoa(final.CommandTimeoutSec))
+		if err != nil {
+			return err
+		}
+		if v, convErr := strconv.Atoi(strings.TrimSpace(timeoutInput)); convErr == nil {
+			final.CommandTimeoutSec = v
+		}
+
+		workersInput, err := promptFleetInput(reader, "Command concurrency", strconv.Itoa(final.CommandConcurrency))
+		if err != nil {
+			return err
+		}
+		if v, convErr := strconv.Atoi(strings.TrimSpace(workersInput)); convErr == nil {
+			final.CommandConcurrency = v
+		}
 	}
 
 	if strings.TrimSpace(final.Token) == "" {
@@ -363,6 +397,12 @@ func runTelegramSetupCommand(controlDir string, args []string) error {
 	if final.NotifyIntervalSec <= 0 {
 		return fmt.Errorf("notify-interval-sec must be > 0")
 	}
+	if final.CommandTimeoutSec <= 0 {
+		return fmt.Errorf("command-timeout-sec must be > 0")
+	}
+	if final.CommandConcurrency <= 0 {
+		return fmt.Errorf("command-concurrency must be > 0")
+	}
 	scope, err := normalizeNotifyScope(final.NotifyScope)
 	if err != nil {
 		return fmt.Errorf("notify-scope: %w", err)
@@ -378,6 +418,8 @@ func runTelegramSetupCommand(controlDir string, args []string) error {
 	fmt.Printf("Allow Control: %t\n", final.AllowControl)
 	fmt.Printf("Notify:        %t\n", final.Notify)
 	fmt.Printf("Notify Scope:  %s\n", final.NotifyScope)
+	fmt.Printf("Cmd Timeout:   %ds\n", final.CommandTimeoutSec)
+	fmt.Printf("Cmd Workers:   %d\n", final.CommandConcurrency)
 	fmt.Println()
 	fmt.Println("Next Commands")
 	fmt.Printf("- run:    ralphctl --project-dir \"$PWD\" telegram run --config-file %s\n", configFile)
@@ -396,6 +438,8 @@ type telegramCLIConfig struct {
 	NotifyIntervalSec         int
 	NotifyRetryThreshold      int
 	NotifyPermStreakThreshold int
+	CommandTimeoutSec         int
+	CommandConcurrency        int
 }
 
 func defaultTelegramCLIConfig() telegramCLIConfig {
@@ -406,6 +450,8 @@ func defaultTelegramCLIConfig() telegramCLIConfig {
 		NotifyIntervalSec:         30,
 		NotifyRetryThreshold:      2,
 		NotifyPermStreakThreshold: 3,
+		CommandTimeoutSec:         300,
+		CommandConcurrency:        4,
 	}
 }
 
@@ -470,6 +516,12 @@ func loadTelegramCLIConfig(path string) (telegramCLIConfig, error) {
 	if v, ok := parseIntRaw(values["RALPH_TELEGRAM_NOTIFY_PERM_STREAK_THRESHOLD"]); ok {
 		cfg.NotifyPermStreakThreshold = v
 	}
+	if v, ok := parseIntRaw(values["RALPH_TELEGRAM_COMMAND_TIMEOUT_SEC"]); ok {
+		cfg.CommandTimeoutSec = v
+	}
+	if v, ok := parseIntRaw(values["RALPH_TELEGRAM_COMMAND_CONCURRENCY"]); ok {
+		cfg.CommandConcurrency = v
+	}
 	return cfg, nil
 }
 
@@ -492,6 +544,8 @@ func saveTelegramCLIConfig(path string, cfg telegramCLIConfig) error {
 	b.WriteString("RALPH_TELEGRAM_NOTIFY_INTERVAL_SEC=" + strconv.Itoa(cfg.NotifyIntervalSec) + "\n")
 	b.WriteString("RALPH_TELEGRAM_NOTIFY_RETRY_THRESHOLD=" + strconv.Itoa(cfg.NotifyRetryThreshold) + "\n")
 	b.WriteString("RALPH_TELEGRAM_NOTIFY_PERM_STREAK_THRESHOLD=" + strconv.Itoa(cfg.NotifyPermStreakThreshold) + "\n")
+	b.WriteString("RALPH_TELEGRAM_COMMAND_TIMEOUT_SEC=" + strconv.Itoa(cfg.CommandTimeoutSec) + "\n")
+	b.WriteString("RALPH_TELEGRAM_COMMAND_CONCURRENCY=" + strconv.Itoa(cfg.CommandConcurrency) + "\n")
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		return err
 	}

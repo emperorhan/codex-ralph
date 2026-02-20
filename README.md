@@ -186,7 +186,9 @@ ralphctl --project-dir "$PWD" telegram setup --non-interactive \
   --user-ids "<user-id>" \
   --allow-control=false \
   --notify=true \
-  --notify-scope auto
+  --notify-scope auto \
+  --command-timeout-sec 300 \
+  --command-concurrency 4
 ```
 
 권장:
@@ -212,7 +214,9 @@ ralphctl --project-dir "$PWD" telegram setup --non-interactive \
   --user-ids "<allowed-user-id-1>,<allowed-user-id-2>" \
   --allow-control=false \
   --notify=true \
-  --notify-scope auto
+  --notify-scope auto \
+  --command-timeout-sec 300 \
+  --command-concurrency 4
 ```
 
 보안 규칙:

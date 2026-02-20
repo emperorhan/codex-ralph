@@ -3,11 +3,10 @@ package ralph
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -128,115 +127,109 @@ func TestIsTelegramUserAllowed(t *testing.T) {
 	}
 }
 
-func TestDispatchTelegramCommandQueueFullSendsBusyMessage(t *testing.T) {
+func TestTelegramCommandDispatcherQueuesWithoutDrop(t *testing.T) {
 	t.Parallel()
 
 	requests := make(chan telegramSendMessageRequest, 4)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
-		var req telegramSendMessageRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		requests <- req
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	}))
-	defer server.Close()
+	client := newTelegramMockClient(requests)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	slots := make(chan struct{}, 1)
-	slots <- struct{}{} // force queue-full path
-
-	var handlerCalled int32
-	dispatchTelegramCommand(
-		ctx,
-		slots,
-		2*time.Second,
-		func(ctx context.Context, chatID int64, text string) (string, error) {
-			atomic.AddInt32(&handlerCalled, 1)
-			return "pong", nil
+	dispatcher := newTelegramCommandDispatcher(ctx, telegramCommandDispatcherOptions{
+		CommandTimeout: 3 * time.Second,
+		Concurrency:    1,
+		OnCommand: func(ctx context.Context, chatID int64, text string) (string, error) {
+			// Force queueing under concurrency=1.
+			time.Sleep(80 * time.Millisecond)
+			return "ack:" + text, nil
 		},
-		server.Client(),
-		server.URL,
-		"token",
-		123,
-		"/ping",
-		io.Discard,
-	)
+		Client:  client,
+		BaseURL: "https://api.telegram.org",
+		Token:   "token",
+		Out:     io.Discard,
+	})
 
-	select {
-	case req := <-requests:
-		if req.ChatID != 123 {
-			t.Fatalf("busy notice chat mismatch: got=%d want=123", req.ChatID)
+	dispatcher.Submit(99, "one")
+	dispatcher.Submit(99, "two")
+	dispatcher.Submit(99, "three")
+
+	got := make([]telegramSendMessageRequest, 0, 3)
+	deadline := time.After(3 * time.Second)
+	for len(got) < 3 {
+		select {
+		case req := <-requests:
+			got = append(got, req)
+		case <-deadline:
+			t.Fatalf("expected 3 replies, got=%d", len(got))
 		}
-		if !strings.HasPrefix(req.Text, "system busy") {
-			t.Fatalf("expected busy notice, got=%q", req.Text)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatalf("expected busy notice to be sent")
 	}
-
-	if atomic.LoadInt32(&handlerCalled) != 0 {
-		t.Fatalf("handler should not run when queue is full")
+	if got[0].Text != "ack:one" || got[1].Text != "ack:two" || got[2].Text != "ack:three" {
+		t.Fatalf("queued order mismatch: got=%q,%q,%q", got[0].Text, got[1].Text, got[2].Text)
 	}
 }
 
-func TestDispatchTelegramCommandAsyncExecutesHandler(t *testing.T) {
+func TestTelegramCommandDispatcherPerChatOrdering(t *testing.T) {
 	t.Parallel()
 
-	requests := make(chan telegramSendMessageRequest, 4)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
-		var req telegramSendMessageRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		requests <- req
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	}))
-	defer server.Close()
+	requests := make(chan telegramSendMessageRequest, 8)
+	client := newTelegramMockClient(requests)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	slots := make(chan struct{}, 1)
-	dispatchTelegramCommand(
-		ctx,
-		slots,
-		2*time.Second,
-		func(ctx context.Context, chatID int64, text string) (string, error) {
-			return "pong async", nil
+	dispatcher := newTelegramCommandDispatcher(ctx, telegramCommandDispatcherOptions{
+		CommandTimeout: 3 * time.Second,
+		Concurrency:    2,
+		OnCommand: func(ctx context.Context, chatID int64, text string) (string, error) {
+			time.Sleep(40 * time.Millisecond)
+			return fmt.Sprintf("%d:%s", chatID, text), nil
 		},
-		server.Client(),
-		server.URL,
-		"token",
-		77,
-		"/ping",
-		io.Discard,
-	)
+		Client:  client,
+		BaseURL: "https://api.telegram.org",
+		Token:   "token",
+		Out:     io.Discard,
+	})
 
-	select {
-	case req := <-requests:
-		if req.ChatID != 77 {
-			t.Fatalf("reply chat mismatch: got=%d want=77", req.ChatID)
-		}
-		if req.Text != "pong async" {
-			t.Fatalf("reply text mismatch: got=%q want=%q", req.Text, "pong async")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatalf("expected async reply to be sent")
-	}
+	dispatcher.Submit(1, "a")
+	dispatcher.Submit(1, "b")
+	dispatcher.Submit(2, "x")
+	dispatcher.Submit(2, "y")
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
+	gotByChat := map[int64][]string{}
+	deadline := time.After(3 * time.Second)
+	for len(gotByChat[1]) < 2 || len(gotByChat[2]) < 2 {
 		select {
-		case slots <- struct{}{}:
-			return
-		default:
-			if time.Now().After(deadline) {
-				t.Fatalf("command slot should be released after handler completes")
-			}
-			time.Sleep(10 * time.Millisecond)
+		case req := <-requests:
+			gotByChat[req.ChatID] = append(gotByChat[req.ChatID], req.Text)
+		case <-deadline:
+			t.Fatalf("timed out waiting replies: %+v", gotByChat)
 		}
+	}
+	if strings.Join(gotByChat[1], ",") != "1:a,1:b" {
+		t.Fatalf("chat1 order mismatch: %v", gotByChat[1])
+	}
+	if strings.Join(gotByChat[2], ",") != "2:x,2:y" {
+		t.Fatalf("chat2 order mismatch: %v", gotByChat[2])
+	}
+}
+
+type roundTripFunc func(req *http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func newTelegramMockClient(requests chan telegramSendMessageRequest) *http.Client {
+	return &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			defer req.Body.Close()
+			var payload telegramSendMessageRequest
+			_ = json.NewDecoder(req.Body).Decode(&payload)
+			requests <- payload
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			}, nil
+		}),
 	}
 }
