@@ -1247,31 +1247,49 @@ func advanceTelegramPRDSession(session telegramPRDSession, input string) (telegr
 		return session, fmt.Sprintf("product set: %s\n- next: /prd refine", session.ProductName), nil
 
 	case telegramPRDStageAwaitProblem:
+		if help, handled := explainTelegramPRDContextStageIfQuestion(session.Stage, input); handled {
+			return session, help, nil
+		}
 		session.Context.Problem = normalizeTelegramPRDContextAnswer(input, "현재 기능/운영상 pain point는 명시되지 않음")
 		recordTelegramPRDAssumption(&session.Context, "problem", session.Context.Problem)
 		return advanceTelegramPRDRefineFlow(session)
 
 	case telegramPRDStageAwaitGoal:
+		if help, handled := explainTelegramPRDContextStageIfQuestion(session.Stage, input); handled {
+			return session, help, nil
+		}
 		session.Context.Goal = normalizeTelegramPRDContextAnswer(input, "단기 목표는 첫 동작 가능한 자동화 루프 확보")
 		recordTelegramPRDAssumption(&session.Context, "goal", session.Context.Goal)
 		return advanceTelegramPRDRefineFlow(session)
 
 	case telegramPRDStageAwaitInScope:
+		if help, handled := explainTelegramPRDContextStageIfQuestion(session.Stage, input); handled {
+			return session, help, nil
+		}
 		session.Context.InScope = normalizeTelegramPRDContextAnswer(input, "초기 릴리즈에서는 핵심 사용자 흐름만 포함")
 		recordTelegramPRDAssumption(&session.Context, "in_scope", session.Context.InScope)
 		return advanceTelegramPRDRefineFlow(session)
 
 	case telegramPRDStageAwaitOutOfScope:
+		if help, handled := explainTelegramPRDContextStageIfQuestion(session.Stage, input); handled {
+			return session, help, nil
+		}
 		session.Context.OutOfScope = normalizeTelegramPRDContextAnswer(input, "대규모 리팩터/새 인프라 구축은 제외")
 		recordTelegramPRDAssumption(&session.Context, "out_of_scope", session.Context.OutOfScope)
 		return advanceTelegramPRDRefineFlow(session)
 
 	case telegramPRDStageAwaitAcceptance:
+		if help, handled := explainTelegramPRDContextStageIfQuestion(session.Stage, input); handled {
+			return session, help, nil
+		}
 		session.Context.Acceptance = normalizeTelegramPRDContextAnswer(input, "주요 시나리오 성공 + 실패 시 복구 경로 확인")
 		recordTelegramPRDAssumption(&session.Context, "acceptance", session.Context.Acceptance)
 		return advanceTelegramPRDRefineFlow(session)
 
 	case telegramPRDStageAwaitConstraints:
+		if help, handled := explainTelegramPRDContextStageIfQuestion(session.Stage, input); handled {
+			return session, help, nil
+		}
 		session.Context.Constraints = normalizeTelegramPRDContextAnswer(input, "시간/리소스 제약은 일반적인 단일 개발자 환경 가정")
 		recordTelegramPRDAssumption(&session.Context, "constraints", session.Context.Constraints)
 		return advanceTelegramPRDRefineFlow(session)
@@ -1368,6 +1386,78 @@ func normalizeTelegramPRDContextAnswer(input, defaultAssumption string) string {
 		return fmt.Sprintf("%s %s", telegramPRDAssumedPrefix, strings.TrimSpace(defaultAssumption))
 	}
 	return v
+}
+
+func explainTelegramPRDContextStageIfQuestion(stage, input string) (string, bool) {
+	if !isLikelyTelegramPRDQuestion(input) {
+		return "", false
+	}
+	switch stage {
+	case telegramPRDStageAwaitProblem:
+		return strings.Join([]string{
+			"problem 설명",
+			"- 의미: 지금 사용자가 겪는 핵심 문제",
+			"- 예시: Codex 네트워크 이슈로 루프가 자주 멈추고 수동 복구가 반복됨",
+			"- 지금 답변: 현재 문제를 한 줄로 입력",
+		}, "\n"), true
+	case telegramPRDStageAwaitGoal:
+		return strings.Join([]string{
+			"goal 설명",
+			"- 의미: 이번 사이클이 끝났을 때 달성할 결과",
+			"- 예시: 루프 중단 없이 24시간 운영 가능",
+			"- 지금 답변: 목표를 한 줄로 입력",
+		}, "\n"), true
+	case telegramPRDStageAwaitInScope:
+		return strings.Join([]string{
+			"in-scope 설명",
+			"- 의미: 이번 사이클에서 반드시 구현/검증할 것",
+			"- 예시: watchdog 개선, timeout 강제 실패, 재시도/백오프",
+			"- 지금 답변: 반드시 할 항목을 입력",
+		}, "\n"), true
+	case telegramPRDStageAwaitOutOfScope:
+		return strings.Join([]string{
+			"out-of-scope 설명",
+			"- 의미: 이번 사이클에서 의도적으로 하지 않을 것",
+			"- 예시: 대규모 아키텍처 재설계, 신규 인프라 도입",
+			"- 지금 답변: 제외할 항목을 입력",
+		}, "\n"), true
+	case telegramPRDStageAwaitAcceptance:
+		return strings.Join([]string{
+			"acceptance 설명",
+			"- 의미: 완료로 인정할 수 있는 검증 기준",
+			"- 예시: 재시도 3회 후 실패 기록, 데몬 자동 재시작 확인",
+			"- 지금 답변: 검증 가능한 기준을 입력",
+		}, "\n"), true
+	case telegramPRDStageAwaitConstraints:
+		return strings.Join([]string{
+			"constraints 설명",
+			"- 의미: 일정/리소스/환경 제약",
+			"- 예시: 단일 서버, 주말 제외, 네트워크 제한",
+			"- 지금 답변: 제약이 없으면 `skip` 입력",
+		}, "\n"), true
+	default:
+		return "", false
+	}
+}
+
+func isLikelyTelegramPRDQuestion(input string) bool {
+	v := strings.TrimSpace(strings.ToLower(input))
+	if v == "" {
+		return false
+	}
+	if strings.Contains(v, "?") || strings.Contains(v, "？") {
+		return true
+	}
+	keywords := []string{
+		"뭐", "뭔", "무엇", "어떻게", "왜", "의미", "뜻", "설명", "예시", "모르",
+		"what", "why", "how", "meaning", "example", "explain",
+	}
+	for _, k := range keywords {
+		if strings.Contains(v, k) {
+			return true
+		}
+	}
+	return false
 }
 
 func recordTelegramPRDAssumption(ctx *telegramPRDContext, field, value string) {

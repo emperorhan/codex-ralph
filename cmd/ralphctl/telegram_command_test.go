@@ -659,6 +659,25 @@ func TestEvaluateTelegramPRDClarityAssumedValueRequiresRefine(t *testing.T) {
 	}
 }
 
+func TestAdvanceTelegramPRDSessionQuestionDoesNotAdvance(t *testing.T) {
+	t.Parallel()
+
+	s := telegramPRDSession{
+		ChatID: 1,
+		Stage:  telegramPRDStageAwaitInScope,
+	}
+	updated, reply, err := advanceTelegramPRDSession(s, "포함 범위가 뭐지?")
+	if err != nil {
+		t.Fatalf("advance failed: %v", err)
+	}
+	if updated.Stage != telegramPRDStageAwaitInScope {
+		t.Fatalf("stage should stay same on question input: got=%s", updated.Stage)
+	}
+	if !strings.Contains(reply, "in-scope 설명") {
+		t.Fatalf("expected help reply for in-scope question, got=%q", reply)
+	}
+}
+
 func TestTelegramPRDSessionStoreRoundTrip(t *testing.T) {
 	t.Parallel()
 
