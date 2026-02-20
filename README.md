@@ -226,6 +226,16 @@ ralphctl --project-dir "$PWD" telegram setup --non-interactive \
 - `/doctor [all|<project_id>]`
 - `/fleet [all|<project_id>]`
 - (`--allow-control`일 때) `/start|/stop|/restart|/doctor_repair|/recover [all|<project_id>]`
+- (`--allow-control`일 때) `/new [manager|planner|developer|qa] <title>` (role 생략 시 developer)
+- (`--allow-control`일 때) `/prd help` (대화형 PRD wizard)
+
+PRD wizard 빠른 흐름:
+
+1. `/prd start`
+2. 봇 질문에 순서대로 답변: `product -> title -> description -> role -> priority`
+3. 여러 스토리를 이어서 입력
+4. `/prd preview`
+5. `/prd apply` (PRD 저장 + 이슈 큐 반영)
 
 ### 4) 실행 중 graceful 설정 변경
 

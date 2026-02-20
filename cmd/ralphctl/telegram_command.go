@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -488,7 +489,20 @@ func saveTelegramCLIConfig(path string, cfg telegramCLIConfig) error {
 func telegramCommandHandler(controlDir string, paths ralph.Paths, allowControl bool) ralph.TelegramCommandHandler {
 	return func(ctx context.Context, chatID int64, text string) (string, error) {
 		_ = ctx
-		_ = chatID
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return "", nil
+		}
+
+		if allowControl && !strings.HasPrefix(text, "/") {
+			hasSession, err := telegramHasActivePRDSession(controlDir, chatID)
+			if err != nil {
+				return "", err
+			}
+			if hasSession {
+				return telegramPRDHandleInput(controlDir, paths, chatID, text)
+			}
+		}
 
 		cmd, cmdArgs := parseTelegramCommandLine(text)
 		switch cmd {
@@ -536,6 +550,18 @@ func telegramCommandHandler(controlDir string, paths ralph.Paths, allowControl b
 				return "control commands are disabled (run with --allow-control)", nil
 			}
 			return telegramRecoverCommand(controlDir, paths, cmdArgs)
+
+		case "/new", "/issue":
+			if !allowControl {
+				return "control commands are disabled (run with --allow-control)", nil
+			}
+			return telegramNewIssueCommand(paths, cmdArgs)
+
+		case "/prd":
+			if !allowControl {
+				return "control commands are disabled (run with --allow-control)", nil
+			}
+			return telegramPRDCommand(controlDir, paths, chatID, cmdArgs)
 
 		default:
 			return "unknown command\n\n" + buildTelegramHelp(allowControl), nil
@@ -777,6 +803,528 @@ func telegramRecoverCommand(controlDir string, paths ralph.Paths, rawArgs string
 	return b.String(), nil
 }
 
+func telegramNewIssueCommand(paths ralph.Paths, rawArgs string) (string, error) {
+	role, title, err := parseTelegramNewIssueArgs(rawArgs)
+	if err != nil {
+		return "", err
+	}
+	issuePath, issueID, err := ralph.CreateIssue(paths, role, title)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(
+		"issue created\n- id: %s\n- role: %s\n- title: %s\n- path: %s",
+		issueID,
+		role,
+		title,
+		issuePath,
+	), nil
+}
+
+func parseTelegramNewIssueArgs(raw string) (string, string, error) {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return "", "", fmt.Errorf("usage: /new [manager|planner|developer|qa] <title>")
+	}
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return "", "", fmt.Errorf("usage: /new [manager|planner|developer|qa] <title>")
+	}
+
+	first := strings.ToLower(strings.TrimSpace(fields[0]))
+	if ralph.IsSupportedRole(first) {
+		if len(fields) < 2 {
+			return "", "", fmt.Errorf("usage: /new %s <title>", first)
+		}
+		return first, strings.TrimSpace(strings.Join(fields[1:], " ")), nil
+	}
+	return "developer", text, nil
+}
+
+const (
+	telegramPRDStageAwaitProduct      = "await_product"
+	telegramPRDStageAwaitStoryTitle   = "await_story_title"
+	telegramPRDStageAwaitStoryDesc    = "await_story_desc"
+	telegramPRDStageAwaitStoryRole    = "await_story_role"
+	telegramPRDStageAwaitStoryPrio    = "await_story_priority"
+	telegramPRDDefaultPriority        = 1000
+	telegramPRDDefaultProductFallback = "Telegram PRD"
+)
+
+type telegramPRDStory struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Role        string `json:"role"`
+	Priority    int    `json:"priority"`
+}
+
+type telegramPRDDocument struct {
+	UserStories []telegramPRDStory `json:"userStories"`
+}
+
+type telegramPRDSession struct {
+	ChatID          int64              `json:"chat_id"`
+	Stage           string             `json:"stage"`
+	ProductName     string             `json:"product_name"`
+	Stories         []telegramPRDStory `json:"stories"`
+	DraftTitle      string             `json:"draft_title,omitempty"`
+	DraftDesc       string             `json:"draft_desc,omitempty"`
+	DraftRole       string             `json:"draft_role,omitempty"`
+	CreatedAtUTC    string             `json:"created_at_utc,omitempty"`
+	LastUpdatedAtUT string             `json:"last_updated_at_utc,omitempty"`
+}
+
+type telegramPRDSessionStore struct {
+	Sessions map[string]telegramPRDSession `json:"sessions"`
+}
+
+func telegramPRDCommand(controlDir string, paths ralph.Paths, chatID int64, rawArgs string) (string, error) {
+	fields := strings.Fields(strings.TrimSpace(rawArgs))
+	if len(fields) == 0 {
+		return telegramPRDHelp(), nil
+	}
+	sub := strings.ToLower(strings.TrimSpace(fields[0]))
+	arg := strings.TrimSpace(strings.Join(fields[1:], " "))
+
+	switch sub {
+	case "help":
+		return telegramPRDHelp(), nil
+	case "start":
+		return telegramPRDStartSession(controlDir, chatID, arg)
+	case "preview", "status":
+		return telegramPRDPreviewSession(controlDir, chatID)
+	case "save":
+		return telegramPRDSaveSession(controlDir, paths, chatID, arg)
+	case "apply":
+		return telegramPRDApplySession(controlDir, paths, chatID, arg)
+	case "cancel", "stop":
+		return telegramPRDCancelSession(controlDir, chatID)
+	default:
+		return "unknown /prd subcommand\n\n" + telegramPRDHelp(), nil
+	}
+}
+
+func telegramPRDHelp() string {
+	return strings.Join([]string{
+		"Ralph PRD Wizard",
+		"- /prd start [product_name]",
+		"- /prd preview",
+		"- /prd save [file]",
+		"- /prd apply [file]",
+		"- /prd cancel",
+		"",
+		"Flow",
+		"1) /prd start",
+		"2) answer prompts (product -> title -> description -> role -> priority)",
+		"3) repeat story title or run /prd preview, /prd save, /prd apply",
+	}, "\n")
+}
+
+func telegramPRDStartSession(controlDir string, chatID int64, productName string) (string, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	session := telegramPRDSession{
+		ChatID:          chatID,
+		Stage:           telegramPRDStageAwaitProduct,
+		ProductName:     "",
+		Stories:         []telegramPRDStory{},
+		CreatedAtUTC:    now,
+		LastUpdatedAtUT: now,
+	}
+	productName = strings.TrimSpace(productName)
+	if productName != "" {
+		session.ProductName = productName
+		session.Stage = telegramPRDStageAwaitStoryTitle
+	}
+	if err := telegramUpsertPRDSession(controlDir, session); err != nil {
+		return "", err
+	}
+	if session.Stage == telegramPRDStageAwaitStoryTitle {
+		return fmt.Sprintf("PRD wizard started\n- product: %s\n- next: 첫 user story 제목을 입력하세요", session.ProductName), nil
+	}
+	return "PRD wizard started\n- next: 제품/프로젝트 이름을 입력하세요", nil
+}
+
+func telegramPRDPreviewSession(controlDir string, chatID int64) (string, error) {
+	session, found, err := telegramLoadPRDSession(controlDir, chatID)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "no active PRD session\n- run: /prd start", nil
+	}
+	var b strings.Builder
+	fmt.Fprintln(&b, "PRD session")
+	fmt.Fprintf(&b, "- product: %s\n", valueOrDash(strings.TrimSpace(session.ProductName)))
+	fmt.Fprintf(&b, "- stage: %s\n", session.Stage)
+	fmt.Fprintf(&b, "- stories: %d\n", len(session.Stories))
+	maxRows := len(session.Stories)
+	if maxRows > 10 {
+		maxRows = 10
+	}
+	for i := 0; i < maxRows; i++ {
+		s := session.Stories[i]
+		fmt.Fprintf(&b, "- [%d] %s | role=%s | priority=%d\n", i+1, compactSingleLine(s.Title, 70), s.Role, s.Priority)
+	}
+	if len(session.Stories) > maxRows {
+		fmt.Fprintf(&b, "- ... and %d more\n", len(session.Stories)-maxRows)
+	}
+	fmt.Fprintf(&b, "- next: %s\n", telegramPRDStagePrompt(session.Stage))
+	return b.String(), nil
+}
+
+func telegramPRDSaveSession(controlDir string, paths ralph.Paths, chatID int64, rawPath string) (string, error) {
+	session, found, err := telegramLoadPRDSession(controlDir, chatID)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("no active PRD session (run: /prd start)")
+	}
+	if len(session.Stories) == 0 {
+		return "", fmt.Errorf("no stories in session yet")
+	}
+	targetPath, err := resolveTelegramPRDFilePath(paths, chatID, rawPath)
+	if err != nil {
+		return "", err
+	}
+	if err := writeTelegramPRDFile(targetPath, session); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("prd saved\n- file: %s\n- stories: %d", targetPath, len(session.Stories)), nil
+}
+
+func telegramPRDApplySession(controlDir string, paths ralph.Paths, chatID int64, rawPath string) (string, error) {
+	session, found, err := telegramLoadPRDSession(controlDir, chatID)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("no active PRD session (run: /prd start)")
+	}
+	if len(session.Stories) == 0 {
+		return "", fmt.Errorf("no stories in session yet")
+	}
+	targetPath, err := resolveTelegramPRDFilePath(paths, chatID, rawPath)
+	if err != nil {
+		return "", err
+	}
+	if err := writeTelegramPRDFile(targetPath, session); err != nil {
+		return "", err
+	}
+	result, err := ralph.ImportPRDStories(paths, targetPath, "developer", false)
+	if err != nil {
+		return "", err
+	}
+	if err := telegramDeletePRDSession(controlDir, chatID); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(
+		"prd applied\n- file: %s\n- stories_total: %d\n- imported: %d\n- skipped_existing: %d\n- skipped_invalid: %d\n- next: /status",
+		targetPath,
+		result.StoriesTotal,
+		result.Imported,
+		result.SkippedExisting,
+		result.SkippedInvalid,
+	), nil
+}
+
+func telegramPRDCancelSession(controlDir string, chatID int64) (string, error) {
+	if err := telegramDeletePRDSession(controlDir, chatID); err != nil {
+		return "", err
+	}
+	return "PRD session canceled", nil
+}
+
+func telegramPRDHandleInput(controlDir string, paths ralph.Paths, chatID int64, input string) (string, error) {
+	session, found, err := telegramLoadPRDSession(controlDir, chatID)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("no active PRD session")
+	}
+
+	updated, reply, err := advanceTelegramPRDSession(session, input)
+	if err != nil {
+		return "", err
+	}
+	if err := telegramUpsertPRDSession(controlDir, updated); err != nil {
+		return "", err
+	}
+	_ = paths
+	return reply, nil
+}
+
+func advanceTelegramPRDSession(session telegramPRDSession, input string) (telegramPRDSession, string, error) {
+	session.LastUpdatedAtUT = time.Now().UTC().Format(time.RFC3339)
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return session, telegramPRDStagePrompt(session.Stage), nil
+	}
+
+	switch session.Stage {
+	case telegramPRDStageAwaitProduct:
+		session.ProductName = input
+		session.Stage = telegramPRDStageAwaitStoryTitle
+		return session, fmt.Sprintf("product set: %s\n- next: 첫 user story 제목을 입력하세요", session.ProductName), nil
+
+	case telegramPRDStageAwaitStoryTitle:
+		session.DraftTitle = input
+		session.Stage = telegramPRDStageAwaitStoryDesc
+		return session, "story title saved\n- next: 설명을 입력하세요", nil
+
+	case telegramPRDStageAwaitStoryDesc:
+		session.DraftDesc = input
+		session.Stage = telegramPRDStageAwaitStoryRole
+		return session, "story description saved\n- next: role 입력 (manager|planner|developer|qa)", nil
+
+	case telegramPRDStageAwaitStoryRole:
+		role, err := parseTelegramPRDStoryRole(input)
+		if err != nil {
+			return session, "", err
+		}
+		session.DraftRole = role
+		session.Stage = telegramPRDStageAwaitStoryPrio
+		return session, fmt.Sprintf("role saved: %s\n- next: priority 입력 (숫자, 기본값=%d)", role, telegramPRDDefaultPriority), nil
+
+	case telegramPRDStageAwaitStoryPrio:
+		priority, err := parseTelegramPRDStoryPriority(input)
+		if err != nil {
+			return session, "", err
+		}
+		idx := len(session.Stories) + 1
+		story := telegramPRDStory{
+			ID:          telegramPRDStoryID(session, idx),
+			Title:       strings.TrimSpace(session.DraftTitle),
+			Description: strings.TrimSpace(session.DraftDesc),
+			Role:        strings.TrimSpace(session.DraftRole),
+			Priority:    priority,
+		}
+		if strings.TrimSpace(story.Title) == "" || strings.TrimSpace(story.Description) == "" || strings.TrimSpace(story.Role) == "" {
+			return session, "", fmt.Errorf("incomplete story draft; run /prd cancel then /prd start")
+		}
+		session.Stories = append(session.Stories, story)
+		session.DraftTitle = ""
+		session.DraftDesc = ""
+		session.DraftRole = ""
+		session.Stage = telegramPRDStageAwaitStoryTitle
+		return session, fmt.Sprintf(
+			"story added\n- id: %s\n- title: %s\n- role: %s\n- priority: %d\n- stories_total: %d\n- next: 다음 story 제목 입력 또는 /prd preview /prd save /prd apply",
+			story.ID,
+			compactSingleLine(story.Title, 90),
+			story.Role,
+			story.Priority,
+			len(session.Stories),
+		), nil
+
+	default:
+		session.Stage = telegramPRDStageAwaitProduct
+		return session, "session stage reset\n- next: 제품/프로젝트 이름을 입력하세요", nil
+	}
+}
+
+func parseTelegramPRDStoryRole(input string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(input))
+	switch v {
+	case "1":
+		v = "manager"
+	case "2":
+		v = "planner"
+	case "3":
+		v = "developer"
+	case "4":
+		v = "qa"
+	}
+	if !ralph.IsSupportedRole(v) {
+		return "", fmt.Errorf("invalid role: %q (use manager|planner|developer|qa)", input)
+	}
+	return v, nil
+}
+
+func parseTelegramPRDStoryPriority(input string) (int, error) {
+	v := strings.TrimSpace(strings.ToLower(input))
+	if v == "" || v == "default" || v == "skip" {
+		return telegramPRDDefaultPriority, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("invalid priority: %q (use positive number)", input)
+	}
+	return n, nil
+}
+
+func telegramPRDStagePrompt(stage string) string {
+	switch stage {
+	case telegramPRDStageAwaitProduct:
+		return "제품/프로젝트 이름을 입력하세요"
+	case telegramPRDStageAwaitStoryTitle:
+		return "story 제목을 입력하세요"
+	case telegramPRDStageAwaitStoryDesc:
+		return "story 설명을 입력하세요"
+	case telegramPRDStageAwaitStoryRole:
+		return "role 입력 (manager|planner|developer|qa)"
+	case telegramPRDStageAwaitStoryPrio:
+		return fmt.Sprintf("priority 입력 (숫자, 기본값=%d)", telegramPRDDefaultPriority)
+	default:
+		return "unknown stage"
+	}
+}
+
+func telegramHasActivePRDSession(controlDir string, chatID int64) (bool, error) {
+	_, found, err := telegramLoadPRDSession(controlDir, chatID)
+	return found, err
+}
+
+func telegramPRDSessionFile(controlDir string) string {
+	return filepath.Join(controlDir, "telegram-prd-sessions.json")
+}
+
+func telegramSessionKey(chatID int64) string {
+	return strconv.FormatInt(chatID, 10)
+}
+
+func loadTelegramPRDSessionStore(controlDir string) (telegramPRDSessionStore, error) {
+	path := telegramPRDSessionFile(controlDir)
+	store := telegramPRDSessionStore{Sessions: map[string]telegramPRDSession{}}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return store, nil
+		}
+		return store, fmt.Errorf("read prd session store: %w", err)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return store, nil
+	}
+	if err := json.Unmarshal(data, &store); err != nil {
+		return store, fmt.Errorf("parse prd session store: %w", err)
+	}
+	if store.Sessions == nil {
+		store.Sessions = map[string]telegramPRDSession{}
+	}
+	return store, nil
+}
+
+func saveTelegramPRDSessionStore(controlDir string, store telegramPRDSessionStore) error {
+	path := telegramPRDSessionFile(controlDir)
+	if store.Sessions == nil {
+		store.Sessions = map[string]telegramPRDSession{}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create prd session dir: %w", err)
+	}
+	data, err := json.MarshalIndent(store, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal prd session store: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("write prd session store: %w", err)
+	}
+	return nil
+}
+
+func telegramLoadPRDSession(controlDir string, chatID int64) (telegramPRDSession, bool, error) {
+	store, err := loadTelegramPRDSessionStore(controlDir)
+	if err != nil {
+		return telegramPRDSession{}, false, err
+	}
+	key := telegramSessionKey(chatID)
+	session, ok := store.Sessions[key]
+	return session, ok, nil
+}
+
+func telegramUpsertPRDSession(controlDir string, session telegramPRDSession) error {
+	store, err := loadTelegramPRDSessionStore(controlDir)
+	if err != nil {
+		return err
+	}
+	key := telegramSessionKey(session.ChatID)
+	store.Sessions[key] = session
+	return saveTelegramPRDSessionStore(controlDir, store)
+}
+
+func telegramDeletePRDSession(controlDir string, chatID int64) error {
+	store, err := loadTelegramPRDSessionStore(controlDir)
+	if err != nil {
+		return err
+	}
+	delete(store.Sessions, telegramSessionKey(chatID))
+	return saveTelegramPRDSessionStore(controlDir, store)
+}
+
+func resolveTelegramPRDFilePath(paths ralph.Paths, chatID int64, raw string) (string, error) {
+	if err := ralph.EnsureLayout(paths); err != nil {
+		return "", err
+	}
+	target := strings.TrimSpace(raw)
+	if target == "" {
+		target = filepath.Join(paths.ReportsDir, fmt.Sprintf("telegram-prd-%d.json", chatID))
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(paths.ProjectDir, target)
+	}
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return "", fmt.Errorf("resolve prd path: %w", err)
+	}
+	return absTarget, nil
+}
+
+func writeTelegramPRDFile(path string, session telegramPRDSession) error {
+	product := strings.TrimSpace(session.ProductName)
+	if product == "" {
+		product = telegramPRDDefaultProductFallback
+	}
+	stories := make([]telegramPRDStory, 0, len(session.Stories))
+	for _, story := range session.Stories {
+		s := story
+		if strings.TrimSpace(s.ID) == "" {
+			s.ID = telegramPRDStoryID(session, len(stories)+1)
+		}
+		if strings.TrimSpace(s.Role) == "" {
+			s.Role = "developer"
+		}
+		if s.Priority <= 0 {
+			s.Priority = telegramPRDDefaultPriority
+		}
+		stories = append(stories, s)
+	}
+	doc := map[string]any{
+		"metadata": map[string]any{
+			"product":          product,
+			"source":           "telegram-prd-wizard",
+			"generated_at_utc": time.Now().UTC().Format(time.RFC3339),
+		},
+		"userStories": telegramPRDDocument{
+			UserStories: stories,
+		}.UserStories,
+	}
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal prd json: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create prd dir: %w", err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+		return fmt.Errorf("write prd json: %w", err)
+	}
+	return nil
+}
+
+func telegramPRDStoryID(session telegramPRDSession, idx int) string {
+	prefixTime := time.Now().UTC()
+	if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(session.CreatedAtUTC)); err == nil {
+		prefixTime = parsed.UTC()
+	}
+	if idx <= 0 {
+		idx = 1
+	}
+	return fmt.Sprintf("TG-%s-%03d", prefixTime.Format("20060102T150405Z"), idx)
+}
+
 func buildFleetTargetArgs(sub string, spec telegramTargetSpec) []string {
 	args := []string{sub}
 	if spec.All {
@@ -841,6 +1389,8 @@ func buildTelegramHelp(allowControl bool) string {
 			"- /restart [all|<project_id>]",
 			"- /doctor_repair [all|<project_id>]",
 			"- /recover [all|<project_id>]",
+			"- /new [role] <title> (default role: developer)",
+			"- /prd help",
 		)
 	} else {
 		lines = append(lines, "- control commands disabled (--allow-control)")

@@ -307,6 +307,61 @@ func TestBuildStatusAlertsInputRequiredTransition(t *testing.T) {
 	}
 }
 
+func TestParseTelegramNewIssueArgs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		in        string
+		wantRole  string
+		wantTitle string
+		wantErr   bool
+	}{
+		{
+			name:      "default role",
+			in:        "health endpoint 구현",
+			wantRole:  "developer",
+			wantTitle: "health endpoint 구현",
+		},
+		{
+			name:      "explicit role",
+			in:        "qa 결제 시나리오 검증",
+			wantRole:  "qa",
+			wantTitle: "결제 시나리오 검증",
+		},
+		{
+			name:    "missing title with role",
+			in:      "planner",
+			wantErr: true,
+		},
+		{
+			name:    "empty args",
+			in:      "   ",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			role, title, err := parseTelegramNewIssueArgs(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if role != tt.wantRole || title != tt.wantTitle {
+				t.Fatalf("parseTelegramNewIssueArgs(%q)=(%q,%q) want=(%q,%q)", tt.in, role, title, tt.wantRole, tt.wantTitle)
+			}
+		})
+	}
+}
+
 func TestEnsureTelegramForegroundArg(t *testing.T) {
 	t.Parallel()
 
@@ -355,5 +410,202 @@ func TestTelegramPIDState(t *testing.T) {
 	_, running, stale = telegramPIDState(pidFile)
 	if running || !stale {
 		t.Fatalf("non-running pid file should be stale")
+	}
+}
+
+func TestParseTelegramPRDStoryRole(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{in: "developer", want: "developer"},
+		{in: "1", want: "manager"},
+		{in: "4", want: "qa"},
+		{in: "invalid", wantErr: true},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseTelegramPRDStoryRole(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("parseTelegramPRDStoryRole(%q)=%q want=%q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseTelegramPRDStoryPriority(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		in      string
+		want    int
+		wantErr bool
+	}{
+		{in: "", want: telegramPRDDefaultPriority},
+		{in: "default", want: telegramPRDDefaultPriority},
+		{in: "25", want: 25},
+		{in: "0", wantErr: true},
+		{in: "x", wantErr: true},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseTelegramPRDStoryPriority(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("parseTelegramPRDStoryPriority(%q)=%d want=%d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAdvanceTelegramPRDSessionFlow(t *testing.T) {
+	t.Parallel()
+
+	s := telegramPRDSession{
+		ChatID: 1,
+		Stage:  telegramPRDStageAwaitProduct,
+	}
+	var err error
+	if s, _, err = advanceTelegramPRDSession(s, "Wallet"); err != nil {
+		t.Fatalf("set product failed: %v", err)
+	}
+	if s.Stage != telegramPRDStageAwaitStoryTitle {
+		t.Fatalf("stage mismatch after product: %s", s.Stage)
+	}
+
+	if s, _, err = advanceTelegramPRDSession(s, "결제 API 개선"); err != nil {
+		t.Fatalf("set title failed: %v", err)
+	}
+	if s.Stage != telegramPRDStageAwaitStoryDesc {
+		t.Fatalf("stage mismatch after title: %s", s.Stage)
+	}
+
+	if s, _, err = advanceTelegramPRDSession(s, "사용자 결제 실패율을 줄인다"); err != nil {
+		t.Fatalf("set description failed: %v", err)
+	}
+	if s.Stage != telegramPRDStageAwaitStoryRole {
+		t.Fatalf("stage mismatch after desc: %s", s.Stage)
+	}
+
+	if s, _, err = advanceTelegramPRDSession(s, "developer"); err != nil {
+		t.Fatalf("set role failed: %v", err)
+	}
+	if s.Stage != telegramPRDStageAwaitStoryPrio {
+		t.Fatalf("stage mismatch after role: %s", s.Stage)
+	}
+
+	if s, _, err = advanceTelegramPRDSession(s, "10"); err != nil {
+		t.Fatalf("set priority failed: %v", err)
+	}
+	if s.Stage != telegramPRDStageAwaitStoryTitle {
+		t.Fatalf("stage mismatch after priority: %s", s.Stage)
+	}
+	if len(s.Stories) != 1 {
+		t.Fatalf("story count mismatch: got=%d want=1", len(s.Stories))
+	}
+	if s.Stories[0].Role != "developer" || s.Stories[0].Priority != 10 {
+		t.Fatalf("story fields mismatch: role=%s priority=%d", s.Stories[0].Role, s.Stories[0].Priority)
+	}
+}
+
+func TestTelegramPRDSessionStoreRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	controlDir := filepath.Join(t.TempDir(), "control")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("mkdir control dir: %v", err)
+	}
+	session := telegramPRDSession{
+		ChatID:      42,
+		Stage:       telegramPRDStageAwaitStoryTitle,
+		ProductName: "Wallet",
+		Stories: []telegramPRDStory{
+			{ID: "US-001", Title: "결제", Description: "설명", Role: "developer", Priority: 10},
+		},
+	}
+	if err := telegramUpsertPRDSession(controlDir, session); err != nil {
+		t.Fatalf("upsert session failed: %v", err)
+	}
+	got, found, err := telegramLoadPRDSession(controlDir, 42)
+	if err != nil {
+		t.Fatalf("load session failed: %v", err)
+	}
+	if !found {
+		t.Fatalf("session should exist")
+	}
+	if got.ProductName != "Wallet" || len(got.Stories) != 1 {
+		t.Fatalf("loaded session mismatch: %+v", got)
+	}
+	if err := telegramDeletePRDSession(controlDir, 42); err != nil {
+		t.Fatalf("delete session failed: %v", err)
+	}
+	_, found, err = telegramLoadPRDSession(controlDir, 42)
+	if err != nil {
+		t.Fatalf("reload after delete failed: %v", err)
+	}
+	if found {
+		t.Fatalf("session should be deleted")
+	}
+}
+
+func TestWriteTelegramPRDFile(t *testing.T) {
+	t.Parallel()
+
+	controlDir := filepath.Join(t.TempDir(), "control")
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("mkdir control dir: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	paths, err := ralph.NewPaths(controlDir, projectDir)
+	if err != nil {
+		t.Fatalf("new paths failed: %v", err)
+	}
+	target, err := resolveTelegramPRDFilePath(paths, 100, "")
+	if err != nil {
+		t.Fatalf("resolve prd file path failed: %v", err)
+	}
+	session := telegramPRDSession{
+		ChatID:      100,
+		ProductName: "Wallet",
+		Stories: []telegramPRDStory{
+			{ID: "US-001", Title: "결제", Description: "설명", Role: "developer", Priority: 10},
+		},
+	}
+	if err := writeTelegramPRDFile(target, session); err != nil {
+		t.Fatalf("write prd file failed: %v", err)
+	}
+	content, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read prd file failed: %v", err)
+	}
+	if !strings.Contains(string(content), "\"userStories\"") {
+		t.Fatalf("prd file should include userStories: %s", string(content))
 	}
 }
