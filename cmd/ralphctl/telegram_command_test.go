@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -58,6 +59,36 @@ func TestEnvIntDefault(t *testing.T) {
 	t.Setenv("RALPH_TELEGRAM_NOTIFY_INTERVAL_SEC", "invalid")
 	if got := envIntDefault("RALPH_TELEGRAM_NOTIFY_INTERVAL_SEC", 30); got != 30 {
 		t.Fatalf("envIntDefault invalid fallback mismatch: got=%d want=30", got)
+	}
+}
+
+func TestTelegramCommandHandlerFallsBackToCodexChat(t *testing.T) {
+	oldAnalyzer := telegramCodexChatAnalyzer
+	t.Cleanup(func() { telegramCodexChatAnalyzer = oldAnalyzer })
+	telegramCodexChatAnalyzer = func(_ ralph.Paths, _ int64, input string) (string, error) {
+		return "chat-ok: " + input, nil
+	}
+
+	controlDir := filepath.Join(t.TempDir(), "control")
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("mkdir control dir: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	paths, err := ralph.NewPaths(controlDir, projectDir)
+	if err != nil {
+		t.Fatalf("new paths failed: %v", err)
+	}
+
+	handler := telegramCommandHandler(controlDir, paths, true)
+	reply, err := handler(context.Background(), 701, "status")
+	if err != nil {
+		t.Fatalf("handler failed: %v", err)
+	}
+	if !strings.Contains(reply, "chat-ok: status") {
+		t.Fatalf("unexpected chat reply: %q", reply)
 	}
 }
 

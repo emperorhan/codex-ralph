@@ -560,7 +560,12 @@ func telegramCommandHandler(controlDir string, paths ralph.Paths, allowControl b
 			return "", nil
 		}
 
-		if allowControl && !strings.HasPrefix(text, "/") {
+		if strings.HasPrefix(text, "/") {
+			cmd, cmdArgs := parseTelegramCommandLine(text)
+			return dispatchTelegramCommand(controlDir, paths, allowControl, chatID, cmd, cmdArgs)
+		}
+
+		if allowControl {
 			hasSession, err := telegramHasActivePRDSession(paths, chatID)
 			if err != nil {
 				return "", err
@@ -569,69 +574,74 @@ func telegramCommandHandler(controlDir string, paths ralph.Paths, allowControl b
 				return telegramPRDHandleInput(paths, chatID, text)
 			}
 		}
+		return telegramChatConversationInput(paths, chatID, text)
+	}
+}
 
-		cmd, cmdArgs := parseTelegramCommandLine(text)
-		switch cmd {
-		case "", "/help":
-			return buildTelegramHelp(allowControl), nil
+func dispatchTelegramCommand(controlDir string, paths ralph.Paths, allowControl bool, chatID int64, cmd, cmdArgs string) (string, error) {
+	switch cmd {
+	case "", "/help":
+		return buildTelegramHelp(allowControl), nil
 
-		case "/ping":
-			return "pong " + time.Now().UTC().Format(time.RFC3339), nil
+	case "/ping":
+		return "pong " + time.Now().UTC().Format(time.RFC3339), nil
 
-		case "/status":
-			return telegramStatusCommand(controlDir, paths, cmdArgs)
+	case "/status":
+		return telegramStatusCommand(controlDir, paths, cmdArgs)
 
-		case "/fleet", "/fleet_status", "/dashboard":
-			return telegramFleetDashboardCommand(controlDir, cmdArgs)
+	case "/fleet", "/fleet_status", "/dashboard":
+		return telegramFleetDashboardCommand(controlDir, cmdArgs)
 
-		case "/doctor":
-			return telegramDoctorCommand(controlDir, paths, cmdArgs)
+	case "/doctor":
+		return telegramDoctorCommand(controlDir, paths, cmdArgs)
 
-		case "/start":
-			if !allowControl {
-				return "control commands are disabled (run with --allow-control)", nil
-			}
-			return telegramStartCommand(controlDir, paths, cmdArgs)
+	case "/chat":
+		return telegramChatCommand(paths, chatID, cmdArgs)
 
-		case "/stop":
-			if !allowControl {
-				return "control commands are disabled (run with --allow-control)", nil
-			}
-			return telegramStopCommand(controlDir, paths, cmdArgs)
-
-		case "/restart":
-			if !allowControl {
-				return "control commands are disabled (run with --allow-control)", nil
-			}
-			return telegramRestartCommand(controlDir, paths, cmdArgs)
-
-		case "/doctor_repair":
-			if !allowControl {
-				return "control commands are disabled (run with --allow-control)", nil
-			}
-			return telegramDoctorRepairCommand(controlDir, paths, cmdArgs)
-
-		case "/recover":
-			if !allowControl {
-				return "control commands are disabled (run with --allow-control)", nil
-			}
-			return telegramRecoverCommand(controlDir, paths, cmdArgs)
-
-		case "/new", "/issue":
-			if !allowControl {
-				return "control commands are disabled (run with --allow-control)", nil
-			}
-			return telegramNewIssueCommand(paths, cmdArgs)
-
-		case "/prd":
-			if !allowControl {
-				return "control commands are disabled (run with --allow-control)", nil
-			}
-			return telegramPRDCommand(paths, chatID, cmdArgs)
-
-		default:
-			return "unknown command\n\n" + buildTelegramHelp(allowControl), nil
+	case "/start":
+		if !allowControl {
+			return "control commands are disabled (run with --allow-control)", nil
 		}
+		return telegramStartCommand(controlDir, paths, cmdArgs)
+
+	case "/stop":
+		if !allowControl {
+			return "control commands are disabled (run with --allow-control)", nil
+		}
+		return telegramStopCommand(controlDir, paths, cmdArgs)
+
+	case "/restart":
+		if !allowControl {
+			return "control commands are disabled (run with --allow-control)", nil
+		}
+		return telegramRestartCommand(controlDir, paths, cmdArgs)
+
+	case "/doctor_repair":
+		if !allowControl {
+			return "control commands are disabled (run with --allow-control)", nil
+		}
+		return telegramDoctorRepairCommand(controlDir, paths, cmdArgs)
+
+	case "/recover":
+		if !allowControl {
+			return "control commands are disabled (run with --allow-control)", nil
+		}
+		return telegramRecoverCommand(controlDir, paths, cmdArgs)
+
+	case "/new", "/issue":
+		if !allowControl {
+			return "control commands are disabled (run with --allow-control)", nil
+		}
+		return telegramNewIssueCommand(paths, cmdArgs)
+
+	case "/prd":
+		if !allowControl {
+			return "control commands are disabled (run with --allow-control)", nil
+		}
+		return telegramPRDCommand(paths, chatID, cmdArgs)
+
+	default:
+		return "unknown command\n\n" + buildTelegramHelp(allowControl), nil
 	}
 }
 
@@ -966,6 +976,11 @@ func buildTelegramHelp(allowControl bool) string {
 		"- /status [all|<project_id>]",
 		"- /doctor [all|<project_id>]",
 		"- /fleet [all|<project_id>]",
+		"",
+		"Codex Chat",
+		"- plain text message -> Codex conversation in project context",
+		"- /chat <message>",
+		"- /chat status | /chat reset",
 	}
 	if allowControl {
 		lines = append(lines,

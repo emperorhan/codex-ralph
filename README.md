@@ -229,6 +229,9 @@ ralphctl --project-dir "$PWD" telegram setup --non-interactive \
 - `/status [all|<project_id>]`
 - `/doctor [all|<project_id>]`
 - `/fleet [all|<project_id>]`
+- 평문 메시지: 프로젝트 컨텍스트 Codex 대화 (예: `결제 PRD 초안 만들어줘`)
+- `/chat <message>`: Codex 대화를 명시적으로 실행
+- `/chat status`, `/chat reset`: Codex 대화 컨텍스트 확인/초기화
 - (`--allow-control`일 때) `/start|/stop|/restart|/doctor_repair|/recover [all|<project_id>]`
 - (`--allow-control`일 때) `/new [manager|planner|developer|qa] <title>` (role 생략 시 developer)
 - (`--allow-control`일 때) `/prd help` (대화형 PRD wizard + clarity refine)
@@ -248,6 +251,7 @@ PRD wizard 빠른 흐름:
 - 추천 요청(`제외 범위 추천해줘`)을 보내면 현재 단계 기준 추천안을 반환합니다.
 - refine 입력 의도(`답변/설명/추천`)는 Codex가 우선 판단합니다.
 - `/prd score`, `/prd apply`의 게이트 점수는 Codex 점수를 우선 사용합니다(불가 시 heuristic 폴백).
+- PRD 세션이 활성화된 채팅에서는 평문 입력이 우선 `/prd` 세션 입력으로 처리됩니다.
 
 ### 4) 실행 중 graceful 설정 변경
 
