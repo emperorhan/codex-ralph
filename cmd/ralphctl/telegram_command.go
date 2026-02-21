@@ -1132,6 +1132,8 @@ func newScopedStatusNotifyHandler(controlDir string, paths ralph.Paths, scope st
 	}
 }
 
+const telegramInputRequiredReminderInterval = 30 * time.Minute
+
 func hasFleetProjects(controlDir string) (bool, error) {
 	cfg, err := ralph.LoadFleetConfig(controlDir)
 	if err != nil {
@@ -1143,6 +1145,7 @@ func hasFleetProjects(controlDir string) (bool, error) {
 func newFleetStatusNotifyHandler(controlDir string, defaultPaths ralph.Paths, retryThreshold, permThreshold int) ralph.TelegramNotifyHandler {
 	initialized := false
 	prevByProject := map[string]ralph.Status{}
+	lastInputRequiredAlertAt := map[string]time.Time{}
 	return func(ctx context.Context) ([]string, error) {
 		_ = ctx
 
@@ -1189,14 +1192,24 @@ func newFleetStatusNotifyHandler(controlDir string, defaultPaths ralph.Paths, re
 			if !initialized {
 				continue
 			}
-			prev, ok := prevByProject[target.ID]
-			if !ok {
-				continue
-			}
+			prev := prevByProject[target.ID]
 			alerts = append(alerts, buildStatusAlerts(prev, current, retryThreshold, permThreshold)...)
+			now := time.Now().UTC()
+			lastAt := lastInputRequiredAlertAt[target.ID]
+			if shouldSendInputRequiredAlert(prev, current, lastAt, now) {
+				alerts = append(alerts, buildInputRequiredAlert(current.ProjectDir))
+				lastInputRequiredAlertAt[target.ID] = now
+			} else if !ralph.IsInputRequiredStatus(current) {
+				delete(lastInputRequiredAlertAt, target.ID)
+			}
 		}
 
 		prevByProject = currByProject
+		for projectID := range lastInputRequiredAlertAt {
+			if _, ok := currByProject[projectID]; !ok {
+				delete(lastInputRequiredAlertAt, projectID)
+			}
+		}
 		if !initialized {
 			initialized = true
 			return nil, nil
@@ -1208,6 +1221,7 @@ func newFleetStatusNotifyHandler(controlDir string, defaultPaths ralph.Paths, re
 func newStatusNotifyHandler(paths ralph.Paths, retryThreshold, permThreshold int) ralph.TelegramNotifyHandler {
 	initialized := false
 	prev := ralph.Status{}
+	lastInputRequiredAlertAt := time.Time{}
 	return func(ctx context.Context) ([]string, error) {
 		_ = ctx
 		current, err := ralph.GetStatus(paths)
@@ -1220,6 +1234,13 @@ func newStatusNotifyHandler(paths ralph.Paths, retryThreshold, permThreshold int
 			return nil, nil
 		}
 		alerts := buildStatusAlerts(prev, current, retryThreshold, permThreshold)
+		now := time.Now().UTC()
+		if shouldSendInputRequiredAlert(prev, current, lastInputRequiredAlertAt, now) {
+			alerts = append(alerts, buildInputRequiredAlert(current.ProjectDir))
+			lastInputRequiredAlertAt = now
+		} else if !ralph.IsInputRequiredStatus(current) {
+			lastInputRequiredAlertAt = time.Time{}
+		}
 		prev = current
 		return alerts, nil
 	}
@@ -1280,14 +1301,32 @@ func buildStatusAlerts(prev, current ralph.Status, retryThreshold, permThreshold
 			valueOrDash(compactSingleLine(current.LastFailureCause, 160)),
 		))
 	}
-	if ralph.IsInputRequiredStatus(current) && !ralph.IsInputRequiredStatus(prev) {
-		out = append(out, fmt.Sprintf(
-			"[ralph alert][input_required]\n- project: %s\n- message: no queued work. add issue (`./ralph new ...`) or run PRD wizard (`/prd start -> /prd refine -> /prd apply`)",
-			project,
-		))
-	}
 
 	return out
+}
+
+func shouldSendInputRequiredAlert(prev, current ralph.Status, lastSentAt, now time.Time) bool {
+	if !ralph.IsInputRequiredStatus(current) {
+		return false
+	}
+	if !ralph.IsInputRequiredStatus(prev) {
+		return true
+	}
+	if lastSentAt.IsZero() {
+		return true
+	}
+	return now.Sub(lastSentAt) >= telegramInputRequiredReminderInterval
+}
+
+func buildInputRequiredAlert(project string) string {
+	p := strings.TrimSpace(project)
+	if p == "" {
+		p = "(unknown-project)"
+	}
+	return fmt.Sprintf(
+		"[ralph alert][input_required]\n- project: %s\n- message: no queued work. add issue (`./ralph new ...`) or run PRD wizard (`/prd start -> /prd refine -> /prd apply`)",
+		p,
+	)
 }
 
 func startTelegramDaemon(paths ralph.Paths, runArgs []string) (string, error) {

@@ -295,7 +295,7 @@ func TestBuildStatusAlertsSkipsStuckWhenNoWork(t *testing.T) {
 	}
 }
 
-func TestBuildStatusAlertsInputRequiredTransition(t *testing.T) {
+func TestShouldSendInputRequiredAlertOnTransition(t *testing.T) {
 	t.Parallel()
 
 	prev := ralph.Status{
@@ -311,10 +311,78 @@ func TestBuildStatusAlertsInputRequiredTransition(t *testing.T) {
 		Blocked:    0,
 	}
 
-	alerts := buildStatusAlerts(prev, curr, 2, 3)
-	joined := strings.Join(alerts, "\n")
-	if !strings.Contains(joined, "[input_required]") {
-		t.Fatalf("input_required alert should be emitted on transition: %q", joined)
+	if !shouldSendInputRequiredAlert(prev, curr, time.Time{}, time.Now().UTC()) {
+		t.Fatalf("input_required alert should be emitted on transition")
+	}
+}
+
+func TestShouldSendInputRequiredAlertReminderInterval(t *testing.T) {
+	t.Parallel()
+
+	prev := ralph.Status{
+		ProjectDir: "/tmp/p",
+		QueueReady: 0,
+		InProgress: 0,
+		Blocked:    0,
+	}
+	curr := prev
+	now := time.Now().UTC()
+
+	if shouldSendInputRequiredAlert(prev, curr, now.Add(-5*time.Minute), now) {
+		t.Fatalf("input_required reminder should be suppressed before interval")
+	}
+	if !shouldSendInputRequiredAlert(prev, curr, now.Add(-telegramInputRequiredReminderInterval-time.Minute), now) {
+		t.Fatalf("input_required reminder should be emitted after interval")
+	}
+}
+
+func TestShouldSendInputRequiredAlertReentrySendsOncePerIncident(t *testing.T) {
+	t.Parallel()
+
+	working := ralph.Status{
+		ProjectDir: "/tmp/p",
+		QueueReady: 1,
+		InProgress: 0,
+		Blocked:    0,
+	}
+	idle := ralph.Status{
+		ProjectDir: "/tmp/p",
+		QueueReady: 0,
+		InProgress: 0,
+		Blocked:    0,
+	}
+	now := time.Now().UTC()
+
+	// Incident #1: working -> idle should alert immediately.
+	if !shouldSendInputRequiredAlert(working, idle, time.Time{}, now) {
+		t.Fatalf("first incident should emit input_required alert")
+	}
+
+	// While still idle, suppress until reminder interval.
+	if shouldSendInputRequiredAlert(idle, idle, now, now.Add(5*time.Minute)) {
+		t.Fatalf("same incident should not emit again before reminder interval")
+	}
+
+	// Recovered: idle -> working should not emit.
+	if shouldSendInputRequiredAlert(idle, working, now, now.Add(10*time.Minute)) {
+		t.Fatalf("recovery should not emit input_required alert")
+	}
+
+	// Incident #2: working -> idle should emit again immediately, even if last alert was recent.
+	if !shouldSendInputRequiredAlert(working, idle, now, now.Add(11*time.Minute)) {
+		t.Fatalf("reentry incident should emit input_required alert immediately")
+	}
+}
+
+func TestBuildInputRequiredAlert(t *testing.T) {
+	t.Parallel()
+
+	msg := buildInputRequiredAlert("/tmp/project")
+	if !strings.Contains(msg, "[input_required]") {
+		t.Fatalf("alert tag missing: %q", msg)
+	}
+	if !strings.Contains(msg, "/tmp/project") {
+		t.Fatalf("project path missing: %q", msg)
 	}
 }
 
