@@ -634,6 +634,12 @@ func dispatchTelegramCommand(controlDir string, paths ralph.Paths, allowControl 
 		}
 		return telegramNewIssueCommand(paths, cmdArgs)
 
+	case "/task":
+		if !allowControl {
+			return "control commands are disabled (run with --allow-control)", nil
+		}
+		return telegramTaskIssueCommand(paths, chatID, cmdArgs)
+
 	case "/prd":
 		if !allowControl {
 			return "control commands are disabled (run with --allow-control)", nil
@@ -992,6 +998,7 @@ func buildTelegramHelp(allowControl bool) string {
 			"- /doctor_repair [all|<project_id>]",
 			"- /recover [all|<project_id>]",
 			"- /new [role] <title> (default role: developer)",
+			"- /task <natural language request> (Codex -> issue)",
 			"",
 			"PRD Wizard",
 			"- /prd help",
@@ -1010,6 +1017,14 @@ func formatStatusForTelegram(st ralph.Status) string {
 	fmt.Fprintf(&b, "- Project: %s\n", st.ProjectDir)
 	fmt.Fprintf(&b, "- Plugin:  %s\n", st.PluginName)
 	fmt.Fprintf(&b, "- Daemon:  %s\n", st.Daemon)
+	fmt.Fprintf(&b, "- State:   %s\n", st.QueueState)
+	fmt.Fprintf(&b, "- Circuit: %s\n", st.CodexCircuitState)
+	if strings.TrimSpace(st.CodexCircuitOpenUntil) != "" {
+		fmt.Fprintf(&b, "- Circuit Open Until: %s\n", st.CodexCircuitOpenUntil)
+	}
+	if st.CodexCircuitFailures > 0 {
+		fmt.Fprintf(&b, "- Circuit Failures: %d\n", st.CodexCircuitFailures)
+	}
 	fmt.Fprintf(&b, "\nQueue\n")
 	fmt.Fprintf(&b, "- Ready:       %d\n", st.QueueReady)
 	fmt.Fprintf(&b, "- In Progress: %d\n", st.InProgress)

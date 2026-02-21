@@ -92,6 +92,48 @@ func TestTelegramCommandHandlerFallsBackToCodexChat(t *testing.T) {
 	}
 }
 
+func TestTelegramTaskIssueCommand(t *testing.T) {
+	oldAnalyzer := telegramTaskIntakeAnalyzer
+	t.Cleanup(func() { telegramTaskIntakeAnalyzer = oldAnalyzer })
+	telegramTaskIntakeAnalyzer = func(_ ralph.Paths, _ int64, _ string) (telegramTaskIntake, error) {
+		return telegramTaskIntake{
+			Role:       "developer",
+			Title:      "텔레그램 task 입력 테스트",
+			Objective:  "테스트 이슈 생성",
+			Acceptance: []string{"핵심 동작 확인", "회귀 없음"},
+			Priority:   900,
+		}, nil
+	}
+
+	controlDir := filepath.Join(t.TempDir(), "control")
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("mkdir control dir: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	paths, err := ralph.NewPaths(controlDir, projectDir)
+	if err != nil {
+		t.Fatalf("new paths failed: %v", err)
+	}
+
+	reply, err := telegramTaskIssueCommand(paths, 701, "대시보드 작업 넣어줘")
+	if err != nil {
+		t.Fatalf("telegramTaskIssueCommand failed: %v", err)
+	}
+	if !strings.Contains(reply, "task accepted") {
+		t.Fatalf("unexpected reply: %q", reply)
+	}
+	ready, err := ralph.CountReadyIssues(paths)
+	if err != nil {
+		t.Fatalf("count ready issues failed: %v", err)
+	}
+	if ready != 1 {
+		t.Fatalf("expected one ready issue, got=%d", ready)
+	}
+}
+
 func TestParseTelegramTargetSpec(t *testing.T) {
 	t.Parallel()
 

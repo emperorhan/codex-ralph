@@ -42,7 +42,7 @@ func run() error {
 
 	global.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: ralphctl [--control-dir DIR] [--project-dir DIR] <command> [args]")
-		fmt.Fprintln(os.Stderr, "Commands: list-plugins, install, apply-plugin, registry, setup, reload, init, on, off, new, import-prd, recover, doctor, run, supervise, start, stop, restart, status, tail, service, fleet, telegram")
+		fmt.Fprintln(os.Stderr, "Commands: list-plugins, install, apply-plugin, registry, setup, reload, init, on, off, new, intake, import-prd, recover, doctor, run, supervise, start, stop, restart, status, tail, service, fleet, telegram")
 	}
 
 	if err := global.Parse(os.Args[1:]); err != nil {
@@ -198,6 +198,7 @@ func run() error {
 		fmt.Println("- timeout/retry + watchdog + supervisor: enabled")
 		fmt.Println("- runtime profile reload: automatic (loop boundary)")
 		fmt.Println("- supervisor settings changes: daemon restart required")
+		fmt.Println("- local git versioning: initialized (auto-commit on done issues, temp/runtime excluded)")
 		if *startAfter {
 			startResult, err := startProjectDaemon(paths, startOptions{
 				DoctorRepair: true,
@@ -276,6 +277,18 @@ func run() error {
 			return err
 		}
 		fmt.Printf("created: %s\n", path)
+		return nil
+
+	case "intake":
+		if len(cmdArgs) == 0 {
+			return fmt.Errorf("usage: intake <natural language request>")
+		}
+		request := strings.TrimSpace(strings.Join(cmdArgs, " "))
+		reply, err := telegramTaskIssueCommand(paths, 0, request)
+		if err != nil {
+			return err
+		}
+		fmt.Println(reply)
 		return nil
 
 	case "import-prd":
@@ -904,10 +917,12 @@ func renderFleetDashboard(controlDir, projectID string, all bool, out io.Writer)
 		roles, rolePIDs := ralph.RunningRoleDaemons(paths)
 		fmt.Fprintf(
 			out,
-			"- project=%s plugin=%s daemon=%s ready=%d in_progress=%d done=%d blocked=%d\n",
+			"- project=%s plugin=%s daemon=%s state=%s circuit=%s ready=%d in_progress=%d done=%d blocked=%d\n",
 			p.ID,
 			p.Plugin,
 			st.Daemon,
+			st.QueueState,
+			st.CodexCircuitState,
 			st.QueueReady,
 			st.InProgress,
 			st.Done,
@@ -1170,7 +1185,7 @@ func runFleetCommand(controlDir string, args []string) error {
 				return err
 			}
 			roles, rolePIDs := ralph.RunningRoleDaemons(paths)
-			fmt.Printf("- project=%s dir=%s plugin=%s roles=%s daemon=%s ready=%d in_progress=%d done=%d blocked=%d\n", p.ID, p.ProjectDir, p.Plugin, strings.Join(p.AssignedRoles, ","), st.Daemon, st.QueueReady, st.InProgress, st.Done, st.Blocked)
+			fmt.Printf("- project=%s dir=%s plugin=%s roles=%s daemon=%s state=%s circuit=%s ready=%d in_progress=%d done=%d blocked=%d\n", p.ID, p.ProjectDir, p.Plugin, strings.Join(p.AssignedRoles, ","), st.Daemon, st.QueueState, st.CodexCircuitState, st.QueueReady, st.InProgress, st.Done, st.Blocked)
 			if len(roles) > 0 {
 				for _, role := range roles {
 					fmt.Printf("  - worker[%s]=running pid=%d\n", role, rolePIDs[role])

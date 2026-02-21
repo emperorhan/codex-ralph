@@ -226,7 +226,10 @@ func ApplySetupSelections(paths Paths, executablePath string, selections SetupSe
 	if err := pruneLegacySetupEnvOverrides(paths.ProfileLocalFile); err != nil {
 		return err
 	}
-	return EnsureRoleRuleFiles(paths)
+	if err := EnsureRoleRuleFiles(paths); err != nil {
+		return err
+	}
+	return EnsureProjectGitVersioning(paths)
 }
 
 func ApplyStabilityDefaults(paths Paths) error {
@@ -250,6 +253,13 @@ func ApplyStabilityDefaults(paths Paths) error {
 	setProfileConfigValue(existing, "codex_retry_backoff_sec", "10", "RALPH_CODEX_RETRY_BACKOFF_SEC")
 	setProfileConfigValue(existing, "codex_skip_git_repo_check", "true", "RALPH_CODEX_SKIP_GIT_REPO_CHECK")
 	setProfileConfigValue(existing, "codex_output_last_message_enabled", "true", "RALPH_CODEX_OUTPUT_LAST_MESSAGE_ENABLED")
+	setProfileConfigValue(existing, "codex_require_exit_signal", "true", "RALPH_CODEX_REQUIRE_EXIT_SIGNAL")
+	setProfileConfigValue(existing, "codex_exit_signal", "EXIT_SIGNAL: DONE", "RALPH_CODEX_EXIT_SIGNAL")
+	setProfileConfigValue(existing, "codex_context_summary_enabled", "true", "RALPH_CODEX_CONTEXT_SUMMARY_ENABLED")
+	setProfileConfigValue(existing, "codex_context_summary_lines", "8", "RALPH_CODEX_CONTEXT_SUMMARY_LINES")
+	setProfileConfigValue(existing, "codex_circuit_breaker_enabled", "true", "RALPH_CODEX_CIRCUIT_BREAKER_ENABLED")
+	setProfileConfigValue(existing, "codex_circuit_breaker_failures", "3", "RALPH_CODEX_CIRCUIT_BREAKER_FAILURES")
+	setProfileConfigValue(existing, "codex_circuit_breaker_cooldown_sec", "120", "RALPH_CODEX_CIRCUIT_BREAKER_COOLDOWN_SEC")
 	setProfileConfigValue(existing, "inprogress_watchdog_enabled", "true", "RALPH_INPROGRESS_WATCHDOG_ENABLED")
 	setProfileConfigValue(existing, "inprogress_watchdog_stale_sec", "1800", "RALPH_INPROGRESS_WATCHDOG_STALE_SEC")
 	setProfileConfigValue(existing, "inprogress_watchdog_scan_loops", "1", "RALPH_INPROGRESS_WATCHDOG_SCAN_LOOPS")

@@ -34,6 +34,32 @@ type BusyWaitHealResult struct {
 	Err              error
 }
 
+type IssueProcessResult struct {
+	Outcome           string
+	FailureReason     string
+	CodexFailure      bool
+	CodexFailureCause string
+	CodexRetryable    bool
+}
+
+type codexExecutionError struct {
+	Reason    string
+	Detail    string
+	Retryable bool
+}
+
+func (e *codexExecutionError) Error() string {
+	reason := strings.TrimSpace(e.Reason)
+	detail := strings.TrimSpace(e.Detail)
+	if reason == "" {
+		reason = "codex_execution_error"
+	}
+	if detail == "" || detail == reason {
+		return reason
+	}
+	return reason + ": " + detail
+}
+
 func RunLoop(ctx context.Context, paths Paths, profile Profile, opts RunOptions) error {
 	if err := EnsureLayout(paths); err != nil {
 		return err
@@ -62,6 +88,11 @@ func RunLoop(ctx context.Context, paths Paths, profile Profile, opts RunOptions)
 	if err != nil {
 		return err
 	}
+	codexCircuitState, err := LoadCodexCircuitState(paths)
+	if err != nil {
+		return err
+	}
+	codexCircuitWaitingLogged := false
 	profileReloadState, err := LoadProfileReloadState(paths)
 	if err != nil {
 		fmt.Fprintf(opts.Stdout, "[ralph-loop] warning: failed to load profile reload state: %v\n", err)
@@ -128,6 +159,47 @@ func RunLoop(ctx context.Context, paths Paths, profile Profile, opts RunOptions)
 				}
 			}
 			activeProfile = reloadedProfile
+		}
+
+		now := time.Now().UTC()
+		if activeProfile.CodexCircuitBreakerEnabled {
+			if codexCircuitState.IsOpen(now) {
+				remaining := int(codexCircuitState.OpenUntil.Sub(now).Seconds())
+				if remaining < 1 {
+					remaining = 1
+				}
+				if !codexCircuitWaitingLogged {
+					fmt.Fprintf(
+						opts.Stdout,
+						"[ralph-loop] codex circuit open; pausing execution for %ds (failures=%d)\n",
+						remaining,
+						codexCircuitState.ConsecutiveFailures,
+					)
+					_ = AppendBusyWaitEvent(paths, BusyWaitEvent{
+						Type:      "codex_circuit_wait",
+						LoopCount: loopCount,
+						Result:    "waiting",
+						Detail:    fmt.Sprintf("remaining_sec=%d; failures=%d; role_scope=%s", remaining, codexCircuitState.ConsecutiveFailures, roleScopeOrAll(roleScope)),
+					})
+					codexCircuitWaitingLogged = true
+				}
+				if err := sleepOrCancel(ctx, time.Duration(activeProfile.IdleSleepSec)*time.Second); err != nil {
+					return nil
+				}
+				continue
+			}
+			if !codexCircuitState.OpenUntil.IsZero() && !now.Before(codexCircuitState.OpenUntil) {
+				codexCircuitState.OpenUntil = time.Time{}
+				if err := SaveCodexCircuitState(paths, codexCircuitState); err != nil {
+					fmt.Fprintf(opts.Stdout, "[ralph-loop] warning: failed to persist codex circuit close: %v\n", err)
+				}
+			}
+			if codexCircuitWaitingLogged {
+				fmt.Fprintln(opts.Stdout, "[ralph-loop] codex circuit closed; resuming issue execution")
+				codexCircuitWaitingLogged = false
+			}
+		} else {
+			codexCircuitWaitingLogged = false
 		}
 		if busyWaitOwner && activeProfile.InProgressWatchdogEnabled && shouldRunWatchdogScan(tickCount, activeProfile.InProgressWatchdogScanLoops) {
 			recovered, watchdogErr := RecoverStaleInProgressWithCount(paths, time.Duration(activeProfile.InProgressWatchdogStaleSec)*time.Second)
@@ -285,7 +357,8 @@ func RunLoop(ctx context.Context, paths Paths, profile Profile, opts RunOptions)
 		}
 		idleCount = 0
 
-		if err := processIssue(ctx, paths, activeProfile, issuePath, meta, opts.Stdout); err != nil {
+		processResult, err := processIssue(ctx, paths, activeProfile, issuePath, meta, opts.Stdout)
+		if err != nil {
 			fmt.Fprintf(opts.Stdout, "[ralph-loop] issue processing error: %v\n", err)
 			if isLikelyPermissionErr(err) {
 				permissionErrStreak++
@@ -308,6 +381,10 @@ func RunLoop(ctx context.Context, paths Paths, profile Profile, opts RunOptions)
 			}
 		} else {
 			permissionErrStreak = 0
+			updatedCircuit, changed := updateCodexCircuitState(paths, activeProfile, codexCircuitState, processResult, opts.Stdout)
+			if changed {
+				codexCircuitState = updatedCircuit
+			}
 		}
 		loopCount++
 	}
@@ -334,13 +411,16 @@ func profileReloadSummary(p Profile) string {
 		developerModel = "(inherit)"
 	}
 	return fmt.Sprintf(
-		"plugin=%s codex_model=%s codex_model_developer=%s idle_sleep_sec=%d retry=%d timeout=%ds",
+		"plugin=%s codex_model=%s codex_model_developer=%s idle_sleep_sec=%d retry=%d timeout=%ds circuit=%t/%d/%ds",
 		p.PluginName,
 		globalModel,
 		developerModel,
 		p.IdleSleepSec,
 		p.CodexRetryMaxAttempts,
 		p.CodexExecTimeoutSec,
+		p.CodexCircuitBreakerEnabled,
+		p.CodexCircuitBreakerFailures,
+		p.CodexCircuitBreakerCooldownSec,
 	)
 }
 
@@ -362,46 +442,64 @@ func sleepOrCancel(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func processIssue(ctx context.Context, paths Paths, profile Profile, issuePath string, meta IssueMeta, stdout io.Writer) error {
+func processIssue(ctx context.Context, paths Paths, profile Profile, issuePath string, meta IssueMeta, stdout io.Writer) (IssueProcessResult, error) {
+	res := IssueProcessResult{Outcome: "unknown"}
 	inProgressPath := filepath.Join(paths.InProgressDir, meta.ID+".md")
 	if err := os.Rename(issuePath, inProgressPath); err != nil {
-		return fmt.Errorf("move to in-progress: %w", err)
+		return res, fmt.Errorf("move to in-progress: %w", err)
 	}
 	if err := SetIssueStatus(inProgressPath, "in-progress"); err != nil {
-		return err
+		return res, err
 	}
 
 	logPath := filepath.Join(paths.LogsDir, fmt.Sprintf("%s-%s.log", meta.ID, time.Now().UTC().Format("20060102T150405Z")))
 	handoffPath := HandoffFilePath(paths, meta)
 	if err := runCodexAndValidate(ctx, paths, profile, inProgressPath, meta, logPath, handoffPath); err != nil {
+		res.Outcome = "blocked"
+		res.FailureReason = err.Error()
+		var codexErr *codexExecutionError
+		if errors.As(err, &codexErr) {
+			res.CodexFailure = true
+			res.CodexFailureCause = strings.TrimSpace(codexErr.Reason)
+			res.CodexRetryable = codexErr.Retryable
+		}
 		_ = SetIssueStatus(inProgressPath, "blocked")
 		_ = AppendIssueResult(inProgressPath, "blocked", err.Error(), logPath)
 		blockedPath := filepath.Join(paths.BlockedDir, meta.ID+".md")
 		if renameErr := os.Rename(inProgressPath, blockedPath); renameErr != nil {
-			return fmt.Errorf("move blocked failed (%v), root cause: %w", renameErr, err)
+			return res, fmt.Errorf("move blocked failed (%v), root cause: %w", renameErr, err)
 		}
 		if progressErr := AppendProgressEntry(paths, meta, "blocked", err.Error(), logPath); progressErr != nil {
 			fmt.Fprintf(stdout, "[ralph-loop] warning: progress journal append failed: %v\n", progressErr)
 		}
 		fmt.Fprintf(stdout, "[ralph-loop] blocked %s: %v\n", meta.ID, err)
-		return nil
+		return res, nil
 	}
 
 	if err := SetIssueStatus(inProgressPath, "done"); err != nil {
-		return err
+		return res, err
 	}
 	if err := AppendIssueResult(inProgressPath, "done", "completed", logPath); err != nil {
-		return err
+		return res, err
 	}
 	donePath := filepath.Join(paths.DoneDir, meta.ID+".md")
 	if err := os.Rename(inProgressPath, donePath); err != nil {
-		return fmt.Errorf("move done: %w", err)
+		return res, fmt.Errorf("move done: %w", err)
+	}
+	if commitHash, committed, commitErr := AutoCommitIssueChanges(paths, meta); commitErr != nil {
+		fmt.Fprintf(stdout, "[ralph-loop] warning: auto git commit failed for %s: %v\n", meta.ID, commitErr)
+	} else if committed {
+		if strings.TrimSpace(commitHash) == "" {
+			commitHash = "(unknown)"
+		}
+		fmt.Fprintf(stdout, "[ralph-loop] committed %s at %s\n", meta.ID, strings.TrimSpace(commitHash))
 	}
 	if progressErr := AppendProgressEntry(paths, meta, "done", "completed", logPath); progressErr != nil {
 		fmt.Fprintf(stdout, "[ralph-loop] warning: progress journal append failed: %v\n", progressErr)
 	}
 	fmt.Fprintf(stdout, "[ralph-loop] done %s (%s)\n", meta.ID, meta.Title)
-	return nil
+	res.Outcome = "done"
+	return res, nil
 }
 
 func runCodexAndValidate(ctx context.Context, paths Paths, profile Profile, inProgressPath string, meta IssueMeta, logPath, handoffPath string) error {
@@ -425,7 +523,23 @@ func runCodexAndValidate(ctx context.Context, paths Paths, profile Profile, inPr
 	}
 
 	requireHandoff := profile.HandoffRequired && profile.RequireCodex
-	prompt := buildCodexPrompt(paths.ProjectDir, string(issueBytes), meta, handoffPath, ruleBundle, profile.RoleRulesEnabled, requireHandoff, profile.HandoffSchema)
+	recentExecutionSummary := ""
+	if profile.CodexContextSummaryEnabled && profile.CodexContextSummaryLines > 0 {
+		recentExecutionSummary = buildRecentExecutionSummary(paths.ProgressJournal, profile.CodexContextSummaryLines)
+	}
+	prompt := buildCodexPrompt(
+		paths.ProjectDir,
+		string(issueBytes),
+		meta,
+		handoffPath,
+		ruleBundle,
+		profile.RoleRulesEnabled,
+		requireHandoff,
+		profile.HandoffSchema,
+		profile.CodexRequireExitSignal,
+		profile.CodexExitSignal,
+		recentExecutionSummary,
+	)
 	lastMessagePath := ""
 	if profile.CodexOutputLastMessage {
 		lastMessagePath = codexLastMessagePath(logPath)
@@ -466,14 +580,31 @@ func runCodexAndValidate(ctx context.Context, paths Paths, profile Profile, inPr
 			return fmt.Errorf("handoff_invalid: %w", err)
 		}
 	}
+	if err := validateCompletionGate(profile, meta, inProgressPath, handoffPath, lastMessagePath); err != nil {
+		return err
+	}
 
 	return nil
 }
 
-func buildCodexPrompt(projectDir, issueText string, meta IssueMeta, handoffPath string, rules RoleRuleBundle, includeRules, requireHandoff bool, handoffSchema string) string {
+func buildCodexPrompt(
+	projectDir,
+	issueText string,
+	meta IssueMeta,
+	handoffPath string,
+	rules RoleRuleBundle,
+	includeRules,
+	requireHandoff bool,
+	handoffSchema string,
+	requireExitSignal bool,
+	exitSignal string,
+	recentExecutionSummary string,
+) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are executing a local Ralph issue in project %s.\n\nIssue:\n%s\n\n", projectDir, issueText)
 	b.WriteString("Execution rules:\n")
+	b.WriteString("- Treat this issue as a fresh context run.\n")
+	b.WriteString("- Do not rely on prior hidden conversation state.\n")
 	b.WriteString("- Keep edits inside project root.\n")
 	b.WriteString("- Follow acceptance criteria.\n")
 	b.WriteString("- Do not open PR or remote automation.\n")
@@ -493,8 +624,114 @@ func buildCodexPrompt(projectDir, issueText string, meta IssueMeta, handoffPath 
 		b.WriteString(HandoffInstruction(meta, handoffPath, handoffSchema))
 		b.WriteString("\n")
 	}
+	if requireExitSignal {
+		signal := strings.TrimSpace(exitSignal)
+		if signal == "" {
+			signal = "EXIT_SIGNAL: DONE"
+		}
+		b.WriteString("\nCompletion gate:\n")
+		fmt.Fprintf(&b, "- Only when truly complete, include a final line: %s %s\n", signal, meta.ID)
+		b.WriteString("- Do not emit this line if work is incomplete.\n")
+	}
+	if strings.TrimSpace(recentExecutionSummary) != "" {
+		b.WriteString("\nRecent execution memory (short):\n")
+		b.WriteString(recentExecutionSummary)
+		b.WriteString("\n")
+	}
 
 	return b.String()
+}
+
+func buildRecentExecutionSummary(progressJournal string, maxLines int) string {
+	if maxLines <= 0 {
+		return ""
+	}
+	raw, err := os.ReadFile(progressJournal)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(raw), "\n")
+	nonEmpty := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		nonEmpty = append(nonEmpty, compactLoopText(trimmed, 220))
+	}
+	if len(nonEmpty) == 0 {
+		return ""
+	}
+	if len(nonEmpty) > maxLines {
+		nonEmpty = nonEmpty[len(nonEmpty)-maxLines:]
+	}
+	return strings.Join(nonEmpty, "\n")
+}
+
+func validateCompletionGate(profile Profile, meta IssueMeta, issuePath, handoffPath, lastMessagePath string) error {
+	if profile.CodexRequireExitSignal {
+		signal := strings.TrimSpace(profile.CodexExitSignal)
+		if signal == "" {
+			signal = "EXIT_SIGNAL: DONE"
+		}
+		if strings.TrimSpace(lastMessagePath) == "" {
+			return fmt.Errorf("completion_gate_exit_signal_missing_output")
+		}
+		data, err := os.ReadFile(lastMessagePath)
+		if err != nil {
+			return fmt.Errorf("completion_gate_exit_signal_read: %w", err)
+		}
+		text := string(data)
+		fullSignal := signal + " " + meta.ID
+		if strings.Contains(text, fullSignal) {
+			// ok
+		} else if !strings.Contains(text, signal) {
+			return fmt.Errorf("completion_gate_exit_signal_missing")
+		} else {
+			return fmt.Errorf("completion_gate_exit_signal_issue_id_missing")
+		}
+	}
+
+	indicators := 0
+	if profile.HandoffRequired {
+		indicators++
+		if _, err := os.Stat(handoffPath); err != nil {
+			return fmt.Errorf("completion_gate_checklist_missing_handoff: %w", err)
+		}
+	}
+	if shouldValidate(profile, meta.Role) {
+		indicators++
+	}
+	if indicators > 0 {
+		return nil
+	}
+
+	checked, total, err := issueChecklistStats(issuePath)
+	if err != nil {
+		return fmt.Errorf("completion_gate_checklist_read: %w", err)
+	}
+	if total > 0 && checked == 0 {
+		return fmt.Errorf("completion_gate_checklist_incomplete")
+	}
+	return nil
+}
+
+func issueChecklistStats(path string) (checked, total int, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(strings.ToLower(line))
+		switch {
+		case strings.HasPrefix(trimmed, "- [x] "):
+			total++
+			checked++
+		case strings.HasPrefix(trimmed, "- [ ] "):
+			total++
+		}
+	}
+	return checked, total, nil
 }
 
 func shouldValidate(profile Profile, role string) bool {
@@ -513,6 +750,7 @@ func runCodexWithRetries(ctx context.Context, paths Paths, profile Profile, mode
 	}
 
 	var lastErr error
+	lastRetryable := false
 	for attempt := 1; attempt <= attempts; attempt++ {
 		_, _ = fmt.Fprintf(logFile, "[ralph] codex attempt %d/%d\n", attempt, attempts)
 		err, retryable := runSingleCodexAttempt(ctx, paths, profile, model, prompt, logFile, lastMessagePath)
@@ -520,6 +758,7 @@ func runCodexWithRetries(ctx context.Context, paths Paths, profile Profile, mode
 			return nil
 		}
 		lastErr = err
+		lastRetryable = retryable
 		if !retryable || attempt >= attempts {
 			break
 		}
@@ -535,10 +774,22 @@ func runCodexWithRetries(ctx context.Context, paths Paths, profile Profile, mode
 		}
 	}
 
-	if attempts > 1 {
-		return fmt.Errorf("codex_failed_after_%d_attempts: %w", attempts, lastErr)
+	if lastErr == nil {
+		lastErr = fmt.Errorf("unknown codex execution failure")
 	}
-	return lastErr
+	reason := compactLoopText(strings.TrimSpace(lastErr.Error()), 180)
+	detail := compactLoopText(strings.TrimSpace(lastErr.Error()), 220)
+	if lastRetryable && attempts > 1 {
+		reason = fmt.Sprintf("codex_failed_after_%d_attempts", attempts)
+	}
+	if reason == "" {
+		reason = "codex_execution_error"
+	}
+	return &codexExecutionError{
+		Reason:    reason,
+		Detail:    detail,
+		Retryable: lastRetryable,
+	}
 }
 
 func runSingleCodexAttempt(ctx context.Context, paths Paths, profile Profile, model, prompt string, logFile *os.File, lastMessagePath string) (error, bool) {
@@ -598,6 +849,90 @@ func codexLastMessagePath(logPath string) string {
 		base = logPath
 	}
 	return base + ".last.txt"
+}
+
+func updateCodexCircuitState(paths Paths, profile Profile, state CodexCircuitState, result IssueProcessResult, stdout io.Writer) (CodexCircuitState, bool) {
+	if !profile.CodexCircuitBreakerEnabled {
+		return state, false
+	}
+
+	now := time.Now().UTC()
+	changed := false
+	prevOpen := state.IsOpen(now)
+
+	switch {
+	case result.Outcome == "done":
+		if state.ConsecutiveFailures > 0 || !state.OpenUntil.IsZero() || strings.TrimSpace(state.LastFailure) != "" {
+			state.ConsecutiveFailures = 0
+			state.OpenUntil = time.Time{}
+			state.LastFailure = ""
+			state.LastSuccessAt = now
+			changed = true
+		}
+	case result.CodexFailure && result.CodexRetryable:
+		state.ConsecutiveFailures++
+		state.LastFailure = compactLoopText(result.FailureReason, 220)
+		threshold := profile.CodexCircuitBreakerFailures
+		if threshold <= 0 {
+			threshold = 3
+		}
+		if state.ConsecutiveFailures >= threshold {
+			cooldownSec := profile.CodexCircuitBreakerCooldownSec
+			if cooldownSec < 0 {
+				cooldownSec = 0
+			}
+			state.OpenUntil = now.Add(time.Duration(cooldownSec) * time.Second)
+			state.LastOpenedAt = now
+		}
+		changed = true
+	case result.CodexFailure && !result.CodexRetryable:
+		if state.ConsecutiveFailures > 0 || !state.OpenUntil.IsZero() {
+			state.ConsecutiveFailures = 0
+			state.OpenUntil = time.Time{}
+			changed = true
+		}
+		state.LastFailure = compactLoopText(result.FailureReason, 220)
+		changed = true
+	}
+
+	if !changed {
+		return state, false
+	}
+	if err := SaveCodexCircuitState(paths, state); err != nil {
+		fmt.Fprintf(stdout, "[ralph-loop] warning: failed to save codex circuit state: %v\n", err)
+		return state, false
+	}
+
+	isOpen := state.IsOpen(now)
+	if !prevOpen && isOpen {
+		cooldownSec := int(state.OpenUntil.Sub(now).Seconds())
+		if cooldownSec < 0 {
+			cooldownSec = 0
+		}
+		fmt.Fprintf(
+			stdout,
+			"[ralph-loop] codex circuit opened (failures=%d, cooldown=%ds)\n",
+			state.ConsecutiveFailures,
+			cooldownSec,
+		)
+		_ = AppendBusyWaitEvent(paths, BusyWaitEvent{
+			Type:      "codex_circuit_opened",
+			Result:    "opened",
+			Detail:    fmt.Sprintf("failures=%d; cooldown_sec=%d", state.ConsecutiveFailures, cooldownSec),
+			Error:     compactLoopText(state.LastFailure, 180),
+			LoopCount: 0,
+		})
+	}
+	if prevOpen && !isOpen {
+		fmt.Fprintln(stdout, "[ralph-loop] codex circuit closed")
+		_ = AppendBusyWaitEvent(paths, BusyWaitEvent{
+			Type:   "codex_circuit_closed",
+			Result: "closed",
+			Detail: fmt.Sprintf("failures=%d", state.ConsecutiveFailures),
+		})
+	}
+
+	return state, true
 }
 
 func preflightLoopPermissions(paths Paths) error {
@@ -925,4 +1260,16 @@ func exitCode(err error) int {
 		}
 	}
 	return 1
+}
+
+func compactLoopText(raw string, maxLen int) string {
+	text := strings.TrimSpace(strings.ReplaceAll(raw, "\n", " "))
+	if maxLen <= 0 {
+		return text
+	}
+	runes := []rune(text)
+	if len(runes) <= maxLen {
+		return text
+	}
+	return string(runes[:maxLen])
 }

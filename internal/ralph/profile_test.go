@@ -199,3 +199,44 @@ func TestCodexModelForRoleAutoBehavior(t *testing.T) {
 		t.Fatalf("role explicit model mismatch: got=%q want=%q", got, "gpt-5.3-codex-spark")
 	}
 }
+
+func TestLoadProfileCodexRuntimeControls(t *testing.T) {
+	paths := newTestPaths(t)
+	resetProfileEnv(t)
+
+	writeFile(t, paths.ProfileYAMLFile, `
+codex_require_exit_signal: false
+codex_exit_signal: CUSTOM_DONE
+codex_context_summary_enabled: false
+codex_context_summary_lines: 4
+codex_circuit_breaker_enabled: false
+codex_circuit_breaker_failures: 5
+codex_circuit_breaker_cooldown_sec: 90
+`)
+
+	profile, err := LoadProfile(paths)
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+	if profile.CodexRequireExitSignal {
+		t.Fatalf("codex_require_exit_signal mismatch: got=true want=false")
+	}
+	if profile.CodexExitSignal != "CUSTOM_DONE" {
+		t.Fatalf("codex_exit_signal mismatch: got=%q want=%q", profile.CodexExitSignal, "CUSTOM_DONE")
+	}
+	if profile.CodexContextSummaryEnabled {
+		t.Fatalf("codex_context_summary_enabled mismatch: got=true want=false")
+	}
+	if profile.CodexContextSummaryLines != 4 {
+		t.Fatalf("codex_context_summary_lines mismatch: got=%d want=4", profile.CodexContextSummaryLines)
+	}
+	if profile.CodexCircuitBreakerEnabled {
+		t.Fatalf("codex_circuit_breaker_enabled mismatch: got=true want=false")
+	}
+	if profile.CodexCircuitBreakerFailures != 5 {
+		t.Fatalf("codex_circuit_breaker_failures mismatch: got=%d want=5", profile.CodexCircuitBreakerFailures)
+	}
+	if profile.CodexCircuitBreakerCooldownSec != 90 {
+		t.Fatalf("codex_circuit_breaker_cooldown_sec mismatch: got=%d want=90", profile.CodexCircuitBreakerCooldownSec)
+	}
+}

@@ -57,10 +57,12 @@ ralphctl --project-dir "$PWD" setup
 이후:
 
 - `./ralph` 실행 헬퍼가 생성됩니다.
+- 로컬 Git 저장소가 없으면 자동 초기화됩니다.
 - 기본 설정 파일:
   - `.ralph/profile.yaml`
   - `.ralph/profile.local.yaml`
 - 안정성 기본값(timeout/retry/watchdog/supervisor)이 적용됩니다.
+- 완료(`done`)된 이슈 단위로 자동 커밋이 누적됩니다(임시/런타임 파일 제외).
 - 루프 daemon이 자동 시작됩니다.
 
 ### 4) 첫 동작 확인
@@ -234,6 +236,7 @@ ralphctl --project-dir "$PWD" telegram setup --non-interactive \
 - `/chat status`, `/chat reset`: Codex 대화 컨텍스트 확인/초기화
 - (`--allow-control`일 때) `/start|/stop|/restart|/doctor_repair|/recover [all|<project_id>]`
 - (`--allow-control`일 때) `/new [manager|planner|developer|qa] <title>` (role 생략 시 developer)
+- (`--allow-control`일 때) `/task <자연어 요청>` (Codex가 role/title/objective/acceptance를 구조화해 이슈 생성)
 - (`--allow-control`일 때) `/prd help` (대화형 PRD wizard + clarity refine)
 
 PRD wizard 빠른 흐름:
@@ -263,6 +266,13 @@ codex_model: auto
 codex_exec_timeout_sec: 900
 codex_retry_max_attempts: 3
 codex_retry_backoff_sec: 10
+codex_require_exit_signal: true
+codex_exit_signal: "EXIT_SIGNAL: DONE"
+codex_context_summary_enabled: true
+codex_context_summary_lines: 8
+codex_circuit_breaker_enabled: true
+codex_circuit_breaker_failures: 3
+codex_circuit_breaker_cooldown_sec: 120
 idle_sleep_sec: 20
 inprogress_watchdog_enabled: true
 inprogress_watchdog_stale_sec: 1800

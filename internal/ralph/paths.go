@@ -28,6 +28,7 @@ type Paths struct {
 	PIDFile                string
 	RunnerLogFile          string
 	BusyWaitStateFile      string
+	CodexCircuitStateFile  string
 	ProfileReloadStateFile string
 	BusyWaitEventsFile     string
 	ProgressJournal        string
@@ -76,6 +77,7 @@ func NewPaths(controlDir, projectDir string) (Paths, error) {
 		PIDFile:                filepath.Join(ralphDir, "runner.pid"),
 		RunnerLogFile:          filepath.Join(ralphDir, "logs", "runner.out"),
 		BusyWaitStateFile:      filepath.Join(ralphDir, "state.busywait.env"),
+		CodexCircuitStateFile:  filepath.Join(ralphDir, "state.codex-circuit.env"),
 		ProfileReloadStateFile: filepath.Join(ralphDir, "state.profile-reload.env"),
 		BusyWaitEventsFile:     filepath.Join(ralphDir, "reports", "busywait-events.jsonl"),
 		ProgressJournal:        filepath.Join(ralphDir, "reports", "progress-journal.log"),

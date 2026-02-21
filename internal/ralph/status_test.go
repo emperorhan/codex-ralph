@@ -98,3 +98,29 @@ func TestIsInputRequiredStatus(t *testing.T) {
 		t.Fatalf("blocked queue should not require input")
 	}
 }
+
+func TestDeriveQueueState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		ready      int
+		inProgress int
+		blocked    int
+		want       string
+	}{
+		{name: "blocked-priority", ready: 1, inProgress: 1, blocked: 1, want: "blocked"},
+		{name: "in-progress", ready: 1, inProgress: 2, blocked: 0, want: "in_progress"},
+		{name: "ready", ready: 3, inProgress: 0, blocked: 0, want: "ready"},
+		{name: "waiting-input", ready: 0, inProgress: 0, blocked: 0, want: "waiting_input"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := deriveQueueState(tt.ready, tt.inProgress, tt.blocked); got != tt.want {
+				t.Fatalf("deriveQueueState(%d,%d,%d)=%q want=%q", tt.ready, tt.inProgress, tt.blocked, got, tt.want)
+			}
+		})
+	}
+}

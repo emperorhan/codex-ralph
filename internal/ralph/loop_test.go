@@ -3,6 +3,7 @@ package ralph
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -310,5 +311,110 @@ func TestProfileReloadSummary(t *testing.T) {
 	}
 	if !strings.Contains(s, "codex_model_developer=(inherit)") {
 		t.Fatalf("summary should include inherit marker: %q", s)
+	}
+}
+
+func TestValidateCompletionGateRequiresExitSignal(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	issuePath := filepath.Join(dir, "issue.md")
+	if err := os.WriteFile(issuePath, []byte("## Acceptance Criteria\n- [x] done\n"), 0o644); err != nil {
+		t.Fatalf("write issue: %v", err)
+	}
+	lastMessagePath := filepath.Join(dir, "last.txt")
+	if err := os.WriteFile(lastMessagePath, []byte("work completed"), 0o644); err != nil {
+		t.Fatalf("write last message: %v", err)
+	}
+
+	profile := DefaultProfile()
+	profile.HandoffRequired = false
+	profile.ValidateRoles = map[string]struct{}{}
+	meta := IssueMeta{ID: "I-20260220T000000Z-0001", Role: "manager"}
+
+	if err := validateCompletionGate(profile, meta, issuePath, filepath.Join(dir, "handoff.json"), lastMessagePath); err == nil {
+		t.Fatalf("expected completion gate failure when exit signal is missing")
+	}
+
+	if err := os.WriteFile(lastMessagePath, []byte("EXIT_SIGNAL: DONE I-20260220T000000Z-0001"), 0o644); err != nil {
+		t.Fatalf("write last message with signal: %v", err)
+	}
+	if err := validateCompletionGate(profile, meta, issuePath, filepath.Join(dir, "handoff.json"), lastMessagePath); err != nil {
+		t.Fatalf("completion gate should pass with exit signal: %v", err)
+	}
+}
+
+func TestUpdateCodexCircuitState(t *testing.T) {
+	t.Parallel()
+
+	paths := newTestPaths(t)
+	profile := DefaultProfile()
+	profile.CodexCircuitBreakerEnabled = true
+	profile.CodexCircuitBreakerFailures = 2
+	profile.CodexCircuitBreakerCooldownSec = 30
+	state := CodexCircuitState{}
+
+	var out strings.Builder
+	state, changed := updateCodexCircuitState(paths, profile, state, IssueProcessResult{
+		Outcome:        "blocked",
+		FailureReason:  "codex_failed_after_3_attempts",
+		CodexFailure:   true,
+		CodexRetryable: true,
+	}, &out)
+	if !changed {
+		t.Fatalf("first retryable codex failure should change circuit state")
+	}
+	if state.ConsecutiveFailures != 1 {
+		t.Fatalf("consecutive failures mismatch: got=%d want=1", state.ConsecutiveFailures)
+	}
+	if state.IsOpen(time.Now().UTC()) {
+		t.Fatalf("circuit should remain closed before threshold")
+	}
+
+	state, changed = updateCodexCircuitState(paths, profile, state, IssueProcessResult{
+		Outcome:        "blocked",
+		FailureReason:  "codex_failed_after_3_attempts",
+		CodexFailure:   true,
+		CodexRetryable: true,
+	}, &out)
+	if !changed {
+		t.Fatalf("second retryable failure should change circuit state")
+	}
+	if !state.IsOpen(time.Now().UTC()) {
+		t.Fatalf("circuit should open at threshold")
+	}
+
+	state, changed = updateCodexCircuitState(paths, profile, state, IssueProcessResult{
+		Outcome: "done",
+	}, &out)
+	if !changed {
+		t.Fatalf("successful issue should close and reset circuit state")
+	}
+	if state.ConsecutiveFailures != 0 {
+		t.Fatalf("consecutive failures should reset after success")
+	}
+	if state.IsOpen(time.Now().UTC()) {
+		t.Fatalf("circuit should be closed after success")
+	}
+}
+
+func TestBuildRecentExecutionSummary(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "progress.log")
+	content := strings.Join([]string{
+		"- 2026-02-20T09:00:00Z | issue=I-1 | role=developer | status=done",
+		"- 2026-02-20T09:10:00Z | issue=I-2 | role=qa | status=blocked",
+		"- 2026-02-20T09:20:00Z | issue=I-3 | role=developer | status=done",
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write progress: %v", err)
+	}
+	got := buildRecentExecutionSummary(path, 2)
+	if strings.Contains(got, "I-1") {
+		t.Fatalf("summary should keep only last 2 lines")
+	}
+	if !strings.Contains(got, "I-2") || !strings.Contains(got, "I-3") {
+		t.Fatalf("summary should include latest lines: %q", got)
 	}
 }

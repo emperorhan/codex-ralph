@@ -21,6 +21,10 @@ type Status struct {
 	Enabled                bool
 	Daemon                 string
 	DaemonRoles            []string
+	QueueState             string
+	CodexCircuitState      string
+	CodexCircuitOpenUntil  string
+	CodexCircuitFailures   int
 	QueueReady             int
 	InProgress             int
 	Done                   int
@@ -105,6 +109,21 @@ func GetStatus(paths Paths) (Status, error) {
 
 	_ = rolePIDs
 
+	queueState := deriveQueueState(readyCount, inProgressCount, blockedCount)
+	codexCircuitState, codexCircuitErr := LoadCodexCircuitState(paths)
+	if codexCircuitErr != nil {
+		codexCircuitState = CodexCircuitState{}
+	}
+	circuitStateLabel := "closed"
+	circuitOpenUntil := ""
+	now := time.Now().UTC()
+	if codexCircuitState.IsOpen(now) {
+		circuitStateLabel = "open"
+		circuitOpenUntil = codexCircuitState.OpenUntil.Format(time.RFC3339)
+	} else if codexCircuitState.ConsecutiveFailures > 0 {
+		circuitStateLabel = "closed(recovering)"
+	}
+
 	lastDetected := ""
 	if !busyState.LastDetectedAt.IsZero() {
 		lastDetected = busyState.LastDetectedAt.Format(time.RFC3339)
@@ -134,6 +153,10 @@ func GetStatus(paths Paths) (Status, error) {
 		Enabled:                enabled,
 		Daemon:                 daemon,
 		DaemonRoles:            roleRunning,
+		QueueState:             queueState,
+		CodexCircuitState:      circuitStateLabel,
+		CodexCircuitOpenUntil:  circuitOpenUntil,
+		CodexCircuitFailures:   codexCircuitState.ConsecutiveFailures,
 		QueueReady:             readyCount,
 		InProgress:             inProgressCount,
 		Done:                   doneCount,
@@ -167,6 +190,15 @@ func (s Status) Print(w io.Writer) {
 	if len(s.DaemonRoles) > 0 {
 		fmt.Fprintf(w, "Workers: %s\n", strings.Join(s.DaemonRoles, ","))
 	}
+	fmt.Fprintf(w, "State:   %s\n", s.QueueState)
+	fmt.Fprintf(w, "Circuit: %s", s.CodexCircuitState)
+	if s.CodexCircuitOpenUntil != "" {
+		fmt.Fprintf(w, " (until %s)", s.CodexCircuitOpenUntil)
+	}
+	if s.CodexCircuitFailures > 0 {
+		fmt.Fprintf(w, " failures=%d", s.CodexCircuitFailures)
+	}
+	fmt.Fprintln(w)
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[Queue]")
@@ -220,6 +252,19 @@ func (s Status) Print(w io.Writer) {
 	if s.LastPermissionStreak > 0 {
 		fmt.Fprintf(w, "Permission Streak:    %d\n", s.LastPermissionStreak)
 	}
+}
+
+func deriveQueueState(ready, inProgress, blocked int) string {
+	if blocked > 0 {
+		return "blocked"
+	}
+	if inProgress > 0 {
+		return "in_progress"
+	}
+	if ready > 0 {
+		return "ready"
+	}
+	return "waiting_input"
 }
 
 func latestBlockedFailure(blockedDir string) (string, string, string) {
