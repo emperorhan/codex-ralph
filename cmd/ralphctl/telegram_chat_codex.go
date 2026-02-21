@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,8 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
+	"unicode/utf8"
 
 	"codex-ralph/internal/ralph"
 )
@@ -22,289 +21,21 @@ const (
 	telegramCodexChatReplyMaxLen  = 7000
 )
 
-var telegramChatApprovalTTL = 5 * time.Minute
-var telegramChatControlStoreMu sync.Mutex
 var telegramCodexChatAnalyzer = analyzeTelegramChatWithCodex
 
-type telegramChatControlStore struct {
-	Sessions map[string]telegramChatControlSession `json:"sessions"`
-}
-
-type telegramChatControlSession struct {
-	ChatID          int64                        `json:"chat_id"`
-	OpsShortcuts    bool                         `json:"ops_shortcuts"`
-	PendingApproval *telegramChatPendingApproval `json:"pending_approval,omitempty"`
-	LastUpdatedAtUT string                       `json:"last_updated_at_utc,omitempty"`
-}
-
-type telegramChatPendingApproval struct {
-	ID           string `json:"id"`
-	Command      string `json:"command"`
-	Args         string `json:"args,omitempty"`
-	CreatedAtUTC string `json:"created_at_utc"`
-	ExpiresAtUTC string `json:"expires_at_utc"`
-}
-
-func telegramChatControlStoreFile(paths ralph.Paths) string {
-	return filepath.Join(paths.ControlDir, "telegram-chat-control.json")
-}
-
-func defaultTelegramChatControlSession(chatID int64) telegramChatControlSession {
-	return telegramChatControlSession{
-		ChatID:       chatID,
-		OpsShortcuts: true,
-	}
-}
-
-func loadTelegramChatControlStoreUnlocked(path string) (telegramChatControlStore, error) {
-	store := telegramChatControlStore{
-		Sessions: map[string]telegramChatControlSession{},
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return store, nil
-		}
-		return store, err
-	}
-	if len(bytes.TrimSpace(data)) == 0 {
-		return store, nil
-	}
-	if err := json.Unmarshal(data, &store); err != nil {
-		return store, err
-	}
-	if store.Sessions == nil {
-		store.Sessions = map[string]telegramChatControlSession{}
-	}
-	return store, nil
-}
-
-func saveTelegramChatControlStoreUnlocked(path string, store telegramChatControlStore) error {
-	if store.Sessions == nil {
-		store.Sessions = map[string]telegramChatControlSession{}
-	}
-	data, err := json.MarshalIndent(store, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return writeTelegramPRDAtomicFile(path, data, 0o600)
-}
-
-func telegramLoadChatControlSession(paths ralph.Paths, chatID int64) (telegramChatControlSession, error) {
-	telegramChatControlStoreMu.Lock()
-	defer telegramChatControlStoreMu.Unlock()
-
-	store, err := loadTelegramChatControlStoreUnlocked(telegramChatControlStoreFile(paths))
-	if err != nil {
-		return telegramChatControlSession{}, err
-	}
-	session, ok := store.Sessions[telegramSessionKey(chatID)]
-	if !ok {
-		session = defaultTelegramChatControlSession(chatID)
-	}
-	return session, nil
-}
-
-func telegramUpdateChatControlSession(
-	paths ralph.Paths,
-	chatID int64,
-	mutate func(*telegramChatControlSession) error,
-) (telegramChatControlSession, error) {
-	telegramChatControlStoreMu.Lock()
-	defer telegramChatControlStoreMu.Unlock()
-
-	storePath := telegramChatControlStoreFile(paths)
-	store, err := loadTelegramChatControlStoreUnlocked(storePath)
-	if err != nil {
-		return telegramChatControlSession{}, err
-	}
-	key := telegramSessionKey(chatID)
-	session, ok := store.Sessions[key]
-	if !ok {
-		session = defaultTelegramChatControlSession(chatID)
-	}
-	if err := mutate(&session); err != nil {
-		return telegramChatControlSession{}, err
-	}
-	session.LastUpdatedAtUT = time.Now().UTC().Format(time.RFC3339)
-	store.Sessions[key] = session
-	if err := saveTelegramChatControlStoreUnlocked(storePath, store); err != nil {
-		return telegramChatControlSession{}, err
-	}
-	return session, nil
-}
-
-func telegramSetOpsShortcuts(paths ralph.Paths, chatID int64, enabled bool) (telegramChatControlSession, error) {
-	return telegramUpdateChatControlSession(paths, chatID, func(session *telegramChatControlSession) error {
-		session.OpsShortcuts = enabled
-		return nil
-	})
-}
-
-func telegramGenerateApprovalToken() string {
-	return strconv.FormatInt(time.Now().UTC().UnixNano(), 36)
-}
-
-func telegramQueuePendingApproval(paths ralph.Paths, chatID int64, cmd, args string, ttl time.Duration) (telegramChatPendingApproval, error) {
-	if ttl <= 0 {
-		ttl = telegramChatApprovalTTL
-	}
-	now := time.Now().UTC()
-	pending := telegramChatPendingApproval{
-		ID:           telegramGenerateApprovalToken(),
-		Command:      strings.TrimSpace(cmd),
-		Args:         strings.TrimSpace(args),
-		CreatedAtUTC: now.Format(time.RFC3339),
-		ExpiresAtUTC: now.Add(ttl).Format(time.RFC3339),
-	}
-	_, err := telegramUpdateChatControlSession(paths, chatID, func(session *telegramChatControlSession) error {
-		session.PendingApproval = &pending
-		return nil
-	})
-	if err != nil {
-		return telegramChatPendingApproval{}, err
-	}
-	return pending, nil
-}
-
-func telegramConsumePendingApproval(paths ralph.Paths, chatID int64, token string) (telegramChatPendingApproval, bool, error) {
-	token = strings.TrimSpace(strings.ToLower(token))
-	if token == "" {
-		return telegramChatPendingApproval{}, false, nil
-	}
-
-	var (
-		matched bool
-		pending telegramChatPendingApproval
-	)
-	_, err := telegramUpdateChatControlSession(paths, chatID, func(session *telegramChatControlSession) error {
-		if session.PendingApproval == nil {
-			return nil
-		}
-		current := session.PendingApproval
-		expired := false
-		if strings.TrimSpace(current.ExpiresAtUTC) != "" {
-			if expAt, parseErr := time.Parse(time.RFC3339, current.ExpiresAtUTC); parseErr == nil && time.Now().UTC().After(expAt) {
-				expired = true
-			}
-		}
-		if expired {
-			session.PendingApproval = nil
-			return nil
-		}
-		if strings.ToLower(strings.TrimSpace(current.ID)) != token {
-			return nil
-		}
-		pending = *current
-		matched = true
-		session.PendingApproval = nil
-		return nil
-	})
-	if err != nil {
-		return telegramChatPendingApproval{}, false, err
-	}
-	return pending, matched, nil
-}
-
-func telegramOpsCommand(paths ralph.Paths, chatID int64, rawArgs string) (string, error) {
-	fields := strings.Fields(strings.ToLower(strings.TrimSpace(rawArgs)))
-	mode := ""
-	if len(fields) > 0 {
-		mode = fields[0]
-	}
-
-	switch mode {
-	case "", "status":
-		session, err := telegramLoadChatControlSession(paths, chatID)
-		if err != nil {
-			return "", err
-		}
-		return formatTelegramOpsStatus(session), nil
-	case "on":
-		session, err := telegramSetOpsShortcuts(paths, chatID, true)
-		if err != nil {
-			return "", err
-		}
-		return "ops shortcuts enabled\n" + formatTelegramOpsStatus(session), nil
-	case "off":
-		session, err := telegramSetOpsShortcuts(paths, chatID, false)
-		if err != nil {
-			return "", err
-		}
-		return "ops shortcuts disabled\n" + formatTelegramOpsStatus(session), nil
-	default:
-		return "usage: /ops [status|on|off]", nil
-	}
-}
-
-func formatTelegramOpsStatus(session telegramChatControlSession) string {
-	lines := []string{
-		"ops status",
-		fmt.Sprintf("- shortcuts: %t", session.OpsShortcuts),
-	}
-	if session.PendingApproval != nil {
-		lines = append(lines,
-			fmt.Sprintf("- pending: %s", session.PendingApproval.ID),
-			fmt.Sprintf("- pending_command: %s %s", session.PendingApproval.Command, session.PendingApproval.Args),
-			fmt.Sprintf("- pending_expires_at_utc: %s", session.PendingApproval.ExpiresAtUTC),
-		)
-	} else {
-		lines = append(lines, "- pending: none")
-	}
-	return strings.Join(lines, "\n")
-}
-
-func formatTelegramPendingApproval(pending telegramChatPendingApproval) string {
-	return strings.Join([]string{
-		"approval required",
-		fmt.Sprintf("- command: %s %s", pending.Command, pending.Args),
-		fmt.Sprintf("- token: %s", pending.ID),
-		fmt.Sprintf("- approve: /approve %s", pending.ID),
-		fmt.Sprintf("- expires_at_utc: %s", pending.ExpiresAtUTC),
-	}, "\n")
-}
-
-func telegramApproveCommand(controlDir string, paths ralph.Paths, allowControl bool, chatID int64, rawArgs string) (string, error) {
-	token := strings.TrimSpace(rawArgs)
-	if token == "" {
-		return "usage: /approve <token>", nil
-	}
-	pending, matched, err := telegramConsumePendingApproval(paths, chatID, token)
-	if err != nil {
-		return "", err
-	}
-	if !matched {
-		return "no pending approval matched\n- next: run command again to request a new token", nil
-	}
-	reply, err := dispatchTelegramCommand(controlDir, paths, allowControl, chatID, pending.Command, pending.Args)
-	if err != nil {
-		return "", err
-	}
-	return strings.Join([]string{
-		"approval accepted",
-		fmt.Sprintf("- command: %s %s", pending.Command, pending.Args),
-		"",
-		reply,
-	}, "\n"), nil
-}
+var telegramCodexChatLogMaxLines = 1200
+var telegramCodexChatLogTrimLines = 900
+var telegramCodexChatLogMaxBytes = 1 * 1024 * 1024
+var telegramCodexChatLogTrimBytes = 768 * 1024
 
 func telegramChatCommand(paths ralph.Paths, chatID int64, rawArgs string) (string, error) {
 	text := strings.TrimSpace(rawArgs)
 	if text == "" {
-		session, err := telegramLoadChatControlSession(paths, chatID)
-		if err != nil {
-			return "", err
-		}
 		lines := []string{
 			"codex chat",
 			"- usage: /chat <message>",
 			"- status: /chat status",
 			"- reset: /chat reset",
-			"",
-			formatTelegramOpsStatus(session),
 		}
 		return strings.Join(lines, "\n"), nil
 	}
@@ -324,20 +55,14 @@ func telegramChatCommand(paths ralph.Paths, chatID int64, rawArgs string) (strin
 }
 
 func telegramChatStatus(paths ralph.Paths, chatID int64) (string, error) {
-	session, err := telegramLoadChatControlSession(paths, chatID)
-	if err != nil {
-		return "", err
-	}
 	tail := readTelegramChatConversationTail(paths, chatID, 1200)
 	runes := len([]rune(tail))
 	lines := []string{
 		"codex chat status",
-		fmt.Sprintf("- shortcuts: %t", session.OpsShortcuts),
 		fmt.Sprintf("- context_tail_runes: %d", runes),
+		fmt.Sprintf("- policy_lines: max=%d trim=%d", telegramCodexChatLogMaxLines, telegramCodexChatLogTrimLines),
+		fmt.Sprintf("- policy_bytes: max=%d trim=%d", telegramCodexChatLogMaxBytes, telegramCodexChatLogTrimBytes),
 		"- reset: /chat reset",
-	}
-	if session.PendingApproval != nil {
-		lines = append(lines, fmt.Sprintf("- pending_approval: %s", session.PendingApproval.ID))
 	}
 	return strings.Join(lines, "\n"), nil
 }
@@ -504,11 +229,109 @@ func appendTelegramChatConversation(paths ralph.Paths, chatID int64, role, text 
 	if err != nil {
 		return fmt.Errorf("open chat conversation file: %w", err)
 	}
-	defer f.Close()
 	if _, err := f.WriteString(entry); err != nil {
+		_ = f.Close()
 		return fmt.Errorf("append chat conversation file: %w", err)
 	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close chat conversation file: %w", err)
+	}
+	if err := compactTelegramChatConversationFile(path); err != nil {
+		return fmt.Errorf("compact chat conversation file: %w", err)
+	}
 	return nil
+}
+
+func compactTelegramChatConversationFile(path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+
+	data := bytes.ToValidUTF8(raw, []byte("?"))
+	changed := !bytes.Equal(data, raw)
+
+	if telegramCodexChatLogMaxLines > 0 && telegramChatLineCount(data) > telegramCodexChatLogMaxLines {
+		keep := telegramCodexChatLogTrimLines
+		if keep <= 0 || keep > telegramCodexChatLogMaxLines {
+			keep = telegramCodexChatLogMaxLines
+		}
+		data = telegramTailLines(data, keep)
+		changed = true
+	}
+
+	if telegramCodexChatLogMaxBytes > 0 && len(data) > telegramCodexChatLogMaxBytes {
+		keepBytes := telegramCodexChatLogTrimBytes
+		if keepBytes <= 0 || keepBytes > telegramCodexChatLogMaxBytes {
+			keepBytes = telegramCodexChatLogMaxBytes
+		}
+		data = telegramTailValidUTF8Bytes(data, keepBytes)
+		if idx := bytes.Index(data, []byte("\n### ")); idx > 0 {
+			data = data[idx+1:]
+		} else if idx := bytes.IndexByte(data, '\n'); idx >= 0 && idx+1 < len(data) {
+			data = data[idx+1:]
+		}
+		changed = true
+	}
+
+	data = bytes.TrimSpace(data)
+	if len(data) > 0 {
+		data = append(data, '\n')
+	}
+	if !changed {
+		return nil
+	}
+	return writeTelegramPRDAtomicFile(path, data, 0o644)
+}
+
+func telegramChatLineCount(data []byte) int {
+	if len(data) == 0 {
+		return 0
+	}
+	lines := bytes.Count(data, []byte{'\n'})
+	if data[len(data)-1] != '\n' {
+		lines++
+	}
+	return lines
+}
+
+func telegramTailLines(data []byte, keepLines int) []byte {
+	if keepLines <= 0 {
+		return data
+	}
+	text := string(data)
+	lines := strings.Split(text, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) <= keepLines {
+		return []byte(text)
+	}
+	trimmed := strings.Join(lines[len(lines)-keepLines:], "\n")
+	if strings.TrimSpace(trimmed) == "" {
+		return []byte{}
+	}
+	return []byte(trimmed + "\n")
+}
+
+func telegramTailValidUTF8Bytes(data []byte, keepBytes int) []byte {
+	if keepBytes <= 0 || len(data) <= keepBytes {
+		return data
+	}
+	start := len(data) - keepBytes
+	for start < len(data) && !utf8.RuneStart(data[start]) {
+		start++
+	}
+	if start >= len(data) {
+		start = len(data) - keepBytes
+	}
+	return data[start:]
 }
 
 func readTelegramChatConversationTail(paths ralph.Paths, chatID int64, maxRunes int) string {

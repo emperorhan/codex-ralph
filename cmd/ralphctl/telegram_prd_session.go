@@ -168,8 +168,6 @@ func telegramPRDCommand(paths ralph.Paths, chatID int64, rawArgs string) (string
 		reply, err = telegramPRDRefineSession(paths, chatID)
 	case "score":
 		reply, err = telegramPRDScoreSession(paths, chatID)
-	case "approve":
-		reply, err = telegramPRDApproveSession(paths, chatID)
 	case "preview", "status":
 		reply, err = telegramPRDPreviewSession(paths, chatID)
 	case "priority":
@@ -204,7 +202,6 @@ func telegramPRDHelp() string {
 		"- /prd start [product_name]",
 		"- /prd refine",
 		"- /prd score",
-		"- /prd approve",
 		"- /prd preview",
 		"- /prd priority [manager=900 planner=950 developer=1000 qa=1100|default]",
 		"- /prd save [file]",
@@ -481,26 +478,6 @@ func telegramPRDScoreSession(paths ralph.Paths, chatID int64) (string, error) {
 	return strings.Join(lines, "\n"), nil
 }
 
-func telegramPRDApproveSession(paths ralph.Paths, chatID int64) (string, error) {
-	session, found, err := telegramLoadPRDSession(paths, chatID)
-	if err != nil {
-		return "", err
-	}
-	if !found {
-		return "no active PRD session\n- run: /prd start", nil
-	}
-	session.Approved = true
-	session.LastUpdatedAtUT = time.Now().UTC().Format(time.RFC3339)
-	if err := telegramUpsertPRDSession(paths, session); err != nil {
-		return "", err
-	}
-	status := evaluateTelegramPRDClarity(session)
-	return fmt.Sprintf(
-		"prd apply override enabled\n- score: %d/100\n- note: clarity gate bypassed for this session\n- next: /prd apply",
-		status.Score,
-	), nil
-}
-
 func telegramPRDPreviewSession(paths ralph.Paths, chatID int64) (string, error) {
 	session, found, err := telegramLoadPRDSession(paths, chatID)
 	if err != nil {
@@ -526,7 +503,6 @@ func telegramPRDPreviewSession(paths ralph.Paths, chatID int64) (string, error) 
 	fmt.Fprintln(&b, "PRD session")
 	fmt.Fprintf(&b, "- product: %s\n", valueOrDash(strings.TrimSpace(session.ProductName)))
 	fmt.Fprintf(&b, "- stage: %s\n", session.Stage)
-	fmt.Fprintf(&b, "- approved_override: %t\n", session.Approved)
 	fmt.Fprintf(&b, "- clarity_score: %d/100\n", displayScore)
 	fmt.Fprintf(&b, "- clarity_gate: %d\n", telegramPRDClarityMinScore)
 	fmt.Fprintf(&b, "- scoring_mode: %s\n", scoringMode)
@@ -625,14 +601,13 @@ func telegramPRDApplySession(paths ralph.Paths, chatID int64, rawPath string) (s
 		}
 	}
 
-	if codexScoreErr != nil && !session.Approved {
+	if codexScoreErr != nil {
 		category, detail := classifyTelegramCodexFailure(codexScoreErr)
 		lines := []string{
 			"prd apply blocked",
 			"- scoring_mode: codex_unavailable",
 			"- reason: codex scoring 실패로 apply gate 판단 불가",
 			"- next: codex 상태 복구 후 `/prd score` 또는 `/prd refine` 재시도",
-			"- optional_override: /prd approve",
 		}
 		if category != "" {
 			lines = append(lines, "- codex_error: "+category)
@@ -649,7 +624,7 @@ func telegramPRDApplySession(paths ralph.Paths, chatID int64, rawPath string) (s
 	if !usedCodexGate && codexScoreErr == nil {
 		readyToApply = false
 	}
-	if !readyToApply && !session.Approved {
+	if !readyToApply {
 		missingPreview := "-"
 		if len(missingForReply) > 0 {
 			missingPreview = compactSingleLine(strings.Join(missingForReply, ", "), 180)
@@ -662,7 +637,6 @@ func telegramPRDApplySession(paths ralph.Paths, chatID int64, rawPath string) (s
 			"- reason: missing required context",
 			fmt.Sprintf("- missing: %s", missingPreview),
 			"- next: /prd refine",
-			"- optional_override: /prd approve",
 		}, "\n"), nil
 	}
 	targetPath, err := resolveTelegramPRDFilePath(paths, chatID, rawPath)
@@ -680,14 +654,13 @@ func telegramPRDApplySession(paths ralph.Paths, chatID int64, rawPath string) (s
 		return "", err
 	}
 	return fmt.Sprintf(
-		"prd applied\n- file: %s\n- stories_total: %d\n- imported: %d\n- skipped_existing: %d\n- skipped_invalid: %d\n- clarity_score: %d/100\n- override_used: %t\n- next: /status",
+		"prd applied\n- file: %s\n- stories_total: %d\n- imported: %d\n- skipped_existing: %d\n- skipped_invalid: %d\n- clarity_score: %d/100\n- next: /status",
 		targetPath,
 		result.StoriesTotal,
 		result.Imported,
 		result.SkippedExisting,
 		result.SkippedInvalid,
 		scoreForReply,
-		session.Approved && !readyToApply,
 	), nil
 }
 

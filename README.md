@@ -243,7 +243,6 @@ PRD wizard 빠른 흐름:
 3. 스토리 입력: `title -> description -> role -> priority`
 4. `/prd score` 또는 `/prd preview`
 5. `/prd apply` (점수 미달이면 `/prd refine` 유도)
-6. 필요 시 `/prd approve`로 apply gate override 가능
 
 대화형 입력 팁:
 

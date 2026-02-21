@@ -995,7 +995,7 @@ func buildTelegramHelp(allowControl bool) string {
 			"",
 			"PRD Wizard",
 			"- /prd help",
-			"- /prd start | /prd refine | /prd priority | /prd score | /prd apply | /prd approve",
+			"- /prd start | /prd refine | /prd priority | /prd score | /prd apply",
 		)
 	} else {
 		lines = append(lines, "", "Control", "- disabled (--allow-control=false)")
