@@ -67,8 +67,9 @@ func runTelegramRunCommand(controlDir string, paths ralph.Paths, args []string) 
 	notifyPermStreakThreshold := fs.Int("notify-perm-streak-threshold", envIntDefault("RALPH_TELEGRAM_NOTIFY_PERM_STREAK_THRESHOLD", cfg.NotifyPermStreakThreshold), "permission streak alert threshold")
 	commandTimeoutSec := fs.Int("command-timeout-sec", envIntDefault("RALPH_TELEGRAM_COMMAND_TIMEOUT_SEC", cfg.CommandTimeoutSec), "timeout seconds per telegram command")
 	commandConcurrency := fs.Int("command-concurrency", envIntDefault("RALPH_TELEGRAM_COMMAND_CONCURRENCY", cfg.CommandConcurrency), "max concurrent command workers across chats")
+	rebindBot := fs.Bool("rebind-bot", false, "rebind this bot token to current project (1 bot = 1 project policy)")
 	pollTimeoutSec := fs.Int("poll-timeout-sec", 30, "telegram getUpdates timeout (seconds)")
-	offsetFile := fs.String("offset-file", filepath.Join(controlDir, "telegram.offset"), "telegram update offset file")
+	offsetFile := fs.String("offset-file", defaultTelegramOffsetFile(controlDir, paths.ProjectDir), "telegram update offset file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -76,6 +77,9 @@ func runTelegramRunCommand(controlDir string, paths ralph.Paths, args []string) 
 
 	if strings.TrimSpace(*token) == "" {
 		return fmt.Errorf("--token is required (or run `ralphctl telegram setup`)")
+	}
+	if err := ensureTelegramTokenBound(controlDir, *token, paths.ProjectDir, *rebindBot); err != nil {
+		return err
 	}
 	allowedChatIDs, err := ralph.ParseTelegramChatIDs(*chatIDsRaw)
 	if err != nil {
@@ -193,7 +197,7 @@ func runTelegramStopCommand(paths ralph.Paths, args []string) error {
 
 func runTelegramStatusCommand(controlDir string, paths ralph.Paths, args []string) error {
 	fs := flag.NewFlagSet("telegram status", flag.ContinueOnError)
-	offsetFile := fs.String("offset-file", filepath.Join(controlDir, "telegram.offset"), "telegram update offset file")
+	offsetFile := fs.String("offset-file", defaultTelegramOffsetFile(controlDir, paths.ProjectDir), "telegram update offset file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

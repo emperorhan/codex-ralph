@@ -225,6 +225,9 @@ ralphctl --project-dir "$PWD" telegram setup --non-interactive \
 
 - `allow-control=true` + 그룹/슈퍼그룹 chat id(음수) 조합에서는 `user-ids`가 필수입니다.
 - 제어 명령을 열 때는 `user-ids` 설정을 권장합니다.
+- 기본 정책은 `1 bot = 1 project` 입니다. 같은 bot token을 다른 프로젝트에서 실행하면 차단됩니다.
+- bot token을 다른 프로젝트로 이동하려면: `telegram run --rebind-bot`
+- telegram offset은 프로젝트별로 자동 분리되어 `~/.ralph-control/telegram-offsets/*.offset`에 저장됩니다.
 
 주요 명령:
 
