@@ -406,6 +406,7 @@ func TestBuildStatusAlerts(t *testing.T) {
 	}
 	curr := ralph.Status{
 		ProjectDir:             "/tmp/p",
+		Daemon:                 "running(general_pid=123)",
 		QueueReady:             1,
 		InProgress:             1,
 		Blocked:                2,
@@ -433,6 +434,30 @@ func TestBuildStatusAlerts(t *testing.T) {
 	}
 	if !strings.Contains(joined, "[permission]") {
 		t.Fatalf("missing permission alert: %q", joined)
+	}
+}
+
+func TestBuildStatusAlertsSkipsStuckWhenDaemonStopped(t *testing.T) {
+	t.Parallel()
+
+	prev := ralph.Status{
+		ProjectDir:             "/tmp/p",
+		Daemon:                 "stopped",
+		LastBusyWaitDetectedAt: "",
+	}
+	curr := ralph.Status{
+		ProjectDir:             "/tmp/p",
+		Daemon:                 "stopped",
+		QueueReady:             2,
+		InProgress:             0,
+		LastBusyWaitDetectedAt: "2026-02-20T10:00:00Z",
+		LastBusyWaitIdleCount:  12,
+	}
+
+	alerts := buildStatusAlerts(prev, curr, 2, 3)
+	joined := strings.Join(alerts, "\n")
+	if strings.Contains(joined, "[stuck]") {
+		t.Fatalf("stuck alert should be suppressed when daemon is stopped: %q", joined)
 	}
 }
 
@@ -546,6 +571,38 @@ func TestBuildInputRequiredAlert(t *testing.T) {
 	}
 	if !strings.Contains(msg, "/tmp/project") {
 		t.Fatalf("project path missing: %q", msg)
+	}
+}
+
+func TestSuppressDuplicateStuckAlertsForProject(t *testing.T) {
+	t.Parallel()
+
+	controlDir := filepath.Join(t.TempDir(), "control")
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("mkdir control dir: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	paths, err := ralph.NewPaths(controlDir, projectDir)
+	if err != nil {
+		t.Fatalf("new paths failed: %v", err)
+	}
+
+	alert := "[ralph alert][stuck]\n- project: p\n- busywait_detected_at: 2026-02-22T11:03:30Z\n- idle_count: 21"
+	first := suppressDuplicateStuckAlertsForProject(paths, []string{alert})
+	if len(first) != 1 {
+		t.Fatalf("first stuck alert should pass, got=%d", len(first))
+	}
+	second := suppressDuplicateStuckAlertsForProject(paths, []string{alert})
+	if len(second) != 0 {
+		t.Fatalf("duplicate stuck alert should be suppressed, got=%d", len(second))
+	}
+	next := "[ralph alert][stuck]\n- project: p\n- busywait_detected_at: 2026-02-22T11:05:00Z\n- idle_count: 24"
+	third := suppressDuplicateStuckAlertsForProject(paths, []string{next})
+	if len(third) != 1 {
+		t.Fatalf("new stuck timestamp should pass, got=%d", len(third))
 	}
 }
 

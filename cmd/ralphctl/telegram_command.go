@@ -1458,7 +1458,9 @@ func newFleetStatusNotifyHandler(controlDir string, defaultPaths ralph.Paths, re
 				continue
 			}
 			prev := prevByProject[target.ID]
-			alerts = append(alerts, buildStatusAlerts(prev, current, retryThreshold, permThreshold)...)
+			projectAlerts := buildStatusAlerts(prev, current, retryThreshold, permThreshold)
+			projectAlerts = suppressDuplicateStuckAlertsForProject(target.Paths, projectAlerts)
+			alerts = append(alerts, projectAlerts...)
 			now := time.Now().UTC()
 			lastAt := lastInputRequiredAlertAt[target.ID]
 			if shouldSendInputRequiredAlert(prev, current, lastAt, now) {
@@ -1499,6 +1501,7 @@ func newStatusNotifyHandler(paths ralph.Paths, retryThreshold, permThreshold int
 			return nil, nil
 		}
 		alerts := buildStatusAlerts(prev, current, retryThreshold, permThreshold)
+		alerts = suppressDuplicateStuckAlertsForProject(paths, alerts)
 		now := time.Now().UTC()
 		if shouldSendInputRequiredAlert(prev, current, lastInputRequiredAlertAt, now) {
 			alerts = append(alerts, buildInputRequiredAlert(current.ProjectDir))
@@ -1566,8 +1569,10 @@ func buildStatusAlerts(prev, current ralph.Status, retryThreshold, permThreshold
 		))
 	}
 
+	daemonRunning := strings.HasPrefix(strings.ToLower(strings.TrimSpace(current.Daemon)), "running")
 	if current.LastBusyWaitDetectedAt != "" &&
 		current.LastBusyWaitDetectedAt != prev.LastBusyWaitDetectedAt &&
+		daemonRunning &&
 		(current.QueueReady > 0 || current.InProgress > 0) {
 		out = append(out, fmt.Sprintf(
 			"[ralph alert][stuck]\n- project: %s\n- busywait_detected_at: %s\n- idle_count: %d",
@@ -1588,6 +1593,122 @@ func buildStatusAlerts(prev, current ralph.Status, retryThreshold, permThreshold
 	}
 
 	return out
+}
+
+func suppressDuplicateStuckAlertsForProject(paths ralph.Paths, alerts []string) []string {
+	if len(alerts) == 0 {
+		return alerts
+	}
+	out := make([]string, 0, len(alerts))
+	for _, alert := range alerts {
+		detectedAt, ok := parseTelegramStuckDetectedAt(alert)
+		if !ok {
+			out = append(out, alert)
+			continue
+		}
+		duplicate, err := isDuplicateTelegramStuckAlert(paths, detectedAt)
+		if err != nil || !duplicate {
+			out = append(out, alert)
+		}
+	}
+	return out
+}
+
+func parseTelegramStuckDetectedAt(alert string) (string, bool) {
+	if !strings.Contains(alert, "[ralph alert][stuck]") {
+		return "", false
+	}
+	for _, line := range strings.Split(alert, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "- busywait_detected_at:") {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(trimmed, "- busywait_detected_at:"))
+		if value == "" {
+			return "", false
+		}
+		return value, true
+	}
+	return "", false
+}
+
+func telegramStuckAlertStatePath(paths ralph.Paths) string {
+	return filepath.Join(paths.ControlDir, "telegram-alert-state", telegramProjectKey(paths.ProjectDir)+".stuck.last")
+}
+
+func isDuplicateTelegramStuckAlert(paths ralph.Paths, detectedAt string) (bool, error) {
+	if strings.TrimSpace(detectedAt) == "" {
+		return false, nil
+	}
+	statePath := telegramStuckAlertStatePath(paths)
+	lockPath := statePath + ".lock"
+	if err := acquireTelegramAlertLock(lockPath); err != nil {
+		return false, err
+	}
+	defer releaseTelegramAlertLock(lockPath)
+
+	prev := ""
+	if raw, err := os.ReadFile(statePath); err == nil {
+		prev = strings.TrimSpace(string(raw))
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	if prev == detectedAt {
+		return true, nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		return false, err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(statePath), ".telegram-stuck-*")
+	if err != nil {
+		return false, err
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.WriteString(detectedAt + "\n"); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return false, err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return false, err
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		_ = os.Remove(tmpPath)
+		return false, err
+	}
+	if err := os.Rename(tmpPath, statePath); err != nil {
+		_ = os.Remove(tmpPath)
+		return false, err
+	}
+	return false, nil
+}
+
+func acquireTelegramAlertLock(lockPath string) error {
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			_, _ = f.WriteString(fmt.Sprintf("%d\n", os.Getpid()))
+			_ = f.Close()
+			return nil
+		}
+		if !os.IsExist(err) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("telegram alert lock timeout")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func releaseTelegramAlertLock(lockPath string) {
+	_ = os.Remove(lockPath)
 }
 
 func shouldSendInputRequiredAlert(prev, current ralph.Status, lastSentAt, now time.Time) bool {
