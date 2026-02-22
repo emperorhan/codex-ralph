@@ -626,12 +626,6 @@ func dispatchTelegramCommand(controlDir string, paths ralph.Paths, allowControl 
 		}
 		return telegramDoctorRepairCommand(controlDir, paths, cmdArgs)
 
-	case "/docker_repair":
-		if !allowControl {
-			return "control commands are disabled (run with --allow-control)", nil
-		}
-		return telegramDoctorRepairCommand(controlDir, paths, cmdArgs)
-
 	case "/recover":
 		if !allowControl {
 			return "control commands are disabled (run with --allow-control)", nil

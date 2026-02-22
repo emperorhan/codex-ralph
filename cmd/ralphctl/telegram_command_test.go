@@ -26,7 +26,6 @@ func TestParseTelegramCommandLine(t *testing.T) {
 		{in: "/status@ralphbot", wantCmd: "/status", wantArgs: ""},
 		{in: "status", wantCmd: "/status", wantArgs: ""},
 		{in: "/doctor_repair now", wantCmd: "/doctor_repair", wantArgs: "now"},
-		{in: "/docker_repair", wantCmd: "/docker_repair", wantArgs: ""},
 		{in: "   ", wantCmd: "", wantArgs: ""},
 	}
 	for _, tt := range tests {
