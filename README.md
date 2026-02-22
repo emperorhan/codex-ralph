@@ -247,6 +247,8 @@ ralphctl --project-dir "$PWD" telegram setup --non-interactive \
 - `/chat <message>`: Codex 대화를 명시적으로 실행
 - `/chat status`, `/chat reset`: Codex 대화 컨텍스트 확인/초기화
 - (`--allow-control`일 때) `/start|/stop|/restart|/doctor_repair|/recover|/retry_blocked [all|<project_id>]`
+- `/doctor_repair`는 현재 프로젝트 기준으로 `repair + recover + codex blocked 재큐잉 + 필요 시 circuit reset + daemon 자동 시작`까지 한 번에 수행합니다.
+- `/docker_repair` 오타 alias도 동일하게 지원합니다.
 - (`--allow-control`일 때) `/new [manager|planner|developer|qa] <title>` (role 생략 시 developer)
 - (`--allow-control`일 때) `/task <자연어 요청>` (Codex가 role/title/objective/acceptance를 구조화해 이슈 생성)
 - (`--allow-control`일 때) `/prd help` (대화형 PRD wizard + clarity refine)

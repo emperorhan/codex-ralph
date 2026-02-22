@@ -626,6 +626,12 @@ func dispatchTelegramCommand(controlDir string, paths ralph.Paths, allowControl 
 		}
 		return telegramDoctorRepairCommand(controlDir, paths, cmdArgs)
 
+	case "/docker_repair":
+		if !allowControl {
+			return "control commands are disabled (run with --allow-control)", nil
+		}
+		return telegramDoctorRepairCommand(controlDir, paths, cmdArgs)
+
 	case "/recover":
 		if !allowControl {
 			return "control commands are disabled (run with --allow-control)", nil
@@ -840,11 +846,11 @@ func telegramDoctorRepairCommand(controlDir string, paths ralph.Paths, rawArgs s
 		return "", err
 	}
 	if !spec.HasTarget() {
-		actions, err := ralph.RepairProject(paths)
+		outcome, err := runTelegramDoctorRepairFlow(paths, true)
 		if err != nil {
 			return "", err
 		}
-		return formatDoctorRepairActions(actions), nil
+		return formatDoctorRepairOutcome(outcome), nil
 	}
 	projects, pathsByID, err := resolveTelegramFleetPaths(controlDir, spec)
 	if err != nil {
@@ -853,15 +859,119 @@ func telegramDoctorRepairCommand(controlDir string, paths ralph.Paths, rawArgs s
 	var b strings.Builder
 	fmt.Fprintf(&b, "fleet doctor repair completed (target=%s)\n", spec.Label())
 	for _, p := range projects {
-		actions, err := ralph.RepairProject(pathsByID[p.ID])
+		outcome, err := runTelegramDoctorRepairFlow(pathsByID[p.ID], false)
 		if err != nil {
 			fmt.Fprintf(&b, "- project=%s status=fail detail=%s\n", p.ID, compactSingleLine(err.Error(), 160))
 			continue
 		}
-		pass, warn, fail := countDoctorRepairActions(actions)
-		fmt.Fprintf(&b, "- project=%s pass=%d warn=%d fail=%d\n", p.ID, pass, warn, fail)
+		pass, warn, fail := countDoctorRepairActions(outcome.Actions)
+		fmt.Fprintf(
+			&b,
+			"- project=%s pass=%d warn=%d fail=%d recovered=%d retried=%d daemon=%s circuit_failures=%d\n",
+			p.ID,
+			pass,
+			warn,
+			fail,
+			outcome.RecoveredInProgress,
+			outcome.RetriedBlockedCodex,
+			compactSingleLine(outcome.DaemonState, 60),
+			outcome.CircuitFailures,
+		)
 	}
 	return b.String(), nil
+}
+
+type telegramDoctorRepairOutcome struct {
+	Actions              []ralph.DoctorRepairAction
+	RecoveredInProgress  int
+	RetriedBlockedCodex  int
+	CircuitReset         bool
+	DaemonState          string
+	DaemonChanged        string
+	CircuitFailures      int
+	DoctorPass           int
+	DoctorWarn           int
+	DoctorFail           int
+	InputRequired        bool
+	InputRequiredHint    string
+	LastFailureCause     string
+	LastFailureUpdatedAt string
+}
+
+func runTelegramDoctorRepairFlow(paths ralph.Paths, autoStart bool) (telegramDoctorRepairOutcome, error) {
+	outcome := telegramDoctorRepairOutcome{}
+	actions, err := ralph.RepairProject(paths)
+	if err != nil {
+		return outcome, err
+	}
+	outcome.Actions = actions
+
+	recovered, err := ralph.RecoverInProgressWithCount(paths)
+	if err != nil {
+		return outcome, err
+	}
+	outcome.RecoveredInProgress = recovered
+
+	retried, err := ralph.RetryBlockedIssues(paths, "codex_failed_after", 0)
+	if err != nil {
+		return outcome, err
+	}
+	outcome.RetriedBlockedCodex = retried
+
+	statusAfterRetry, err := ralph.GetStatus(paths)
+	if err != nil {
+		return outcome, err
+	}
+
+	if statusAfterRetry.Blocked == 0 && statusAfterRetry.InProgress == 0 && statusAfterRetry.CodexCircuitFailures > 0 {
+		if err := ralph.SaveCodexCircuitState(paths, ralph.CodexCircuitState{}); err == nil {
+			outcome.CircuitReset = true
+			statusAfterRetry, err = ralph.GetStatus(paths)
+			if err != nil {
+				return outcome, err
+			}
+		}
+	}
+
+	daemonState := strings.TrimSpace(statusAfterRetry.Daemon)
+	if daemonState == "" {
+		daemonState = "unknown"
+	}
+	if autoStart && strings.HasPrefix(strings.ToLower(daemonState), "stopped") {
+		startMsg, startErr := startProjectDaemon(paths, startOptions{
+			DoctorRepair: false,
+			FixPerms:     false,
+			Out:          io.Discard,
+		})
+		if startErr != nil {
+			return outcome, startErr
+		}
+		outcome.DaemonChanged = startMsg
+		statusAfterRetry, err = ralph.GetStatus(paths)
+		if err != nil {
+			return outcome, err
+		}
+		daemonState = strings.TrimSpace(statusAfterRetry.Daemon)
+	}
+
+	report, err := ralph.RunDoctor(paths)
+	if err != nil {
+		return outcome, err
+	}
+	pass, warn, fail := countDoctorChecks(report)
+	outcome.DoctorPass = pass
+	outcome.DoctorWarn = warn
+	outcome.DoctorFail = fail
+	outcome.DaemonState = daemonState
+	outcome.CircuitFailures = statusAfterRetry.CodexCircuitFailures
+	outcome.InputRequired = ralph.IsInputRequiredStatus(statusAfterRetry)
+	if outcome.InputRequired {
+		outcome.InputRequiredHint = "add issue (`./ralph new ...`) or import PRD (`./ralph import-prd --file prd.json`)"
+	}
+	outcome.LastFailureCause = statusAfterRetry.LastFailureCause
+	outcome.LastFailureUpdatedAt = statusAfterRetry.LastFailureUpdatedAt
+
+	return outcome, nil
 }
 
 func telegramRecoverCommand(controlDir string, paths ralph.Paths, rawArgs string) (string, error) {
@@ -1163,6 +1273,41 @@ func formatDoctorRepairActions(actions []ralph.DoctorRepairAction) string {
 	fmt.Fprintf(&b, "doctor repair completed\n")
 	fmt.Fprintf(&b, "- summary: pass=%d warn=%d fail=%d\n", pass, warn, fail)
 	for _, a := range actions {
+		if a.Status == "pass" {
+			continue
+		}
+		fmt.Fprintf(&b, "- [%s] %s: %s\n", a.Status, a.Name, compactSingleLine(a.Detail, 120))
+	}
+	return b.String()
+}
+
+func formatDoctorRepairOutcome(outcome telegramDoctorRepairOutcome) string {
+	pass, warn, fail := countDoctorRepairActions(outcome.Actions)
+	var b strings.Builder
+	fmt.Fprintf(&b, "doctor repair completed\n")
+	fmt.Fprintf(&b, "- summary: pass=%d warn=%d fail=%d\n", pass, warn, fail)
+	fmt.Fprintf(&b, "- recovered_in_progress: %d\n", outcome.RecoveredInProgress)
+	fmt.Fprintf(&b, "- retried_blocked_codex: %d\n", outcome.RetriedBlockedCodex)
+	fmt.Fprintf(&b, "- circuit_reset: %t\n", outcome.CircuitReset)
+	fmt.Fprintf(&b, "- daemon: %s\n", valueOrDash(outcome.DaemonState))
+	if strings.TrimSpace(outcome.DaemonChanged) != "" {
+		fmt.Fprintf(&b, "- daemon_action: %s\n", compactSingleLine(outcome.DaemonChanged, 140))
+	}
+	fmt.Fprintf(&b, "- circuit_failures: %d\n", outcome.CircuitFailures)
+	if strings.TrimSpace(outcome.LastFailureCause) != "" {
+		fmt.Fprintf(&b, "- last_failure: %s\n", compactSingleLine(outcome.LastFailureCause, 140))
+	}
+	if strings.TrimSpace(outcome.LastFailureUpdatedAt) != "" {
+		fmt.Fprintf(&b, "- last_failure_updated_at: %s\n", outcome.LastFailureUpdatedAt)
+	}
+	fmt.Fprintf(&b, "- doctor_after: pass=%d warn=%d fail=%d\n", outcome.DoctorPass, outcome.DoctorWarn, outcome.DoctorFail)
+	if outcome.InputRequired {
+		fmt.Fprintf(&b, "- input_required: true\n")
+		if strings.TrimSpace(outcome.InputRequiredHint) != "" {
+			fmt.Fprintf(&b, "- input_hint: %s\n", compactSingleLine(outcome.InputRequiredHint, 160))
+		}
+	}
+	for _, a := range outcome.Actions {
 		if a.Status == "pass" {
 			continue
 		}

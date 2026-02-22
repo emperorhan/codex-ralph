@@ -26,6 +26,7 @@ func TestParseTelegramCommandLine(t *testing.T) {
 		{in: "/status@ralphbot", wantCmd: "/status", wantArgs: ""},
 		{in: "status", wantCmd: "/status", wantArgs: ""},
 		{in: "/doctor_repair now", wantCmd: "/doctor_repair", wantArgs: "now"},
+		{in: "/docker_repair", wantCmd: "/docker_repair", wantArgs: ""},
 		{in: "   ", wantCmd: "", wantArgs: ""},
 	}
 	for _, tt := range tests {
@@ -546,6 +547,45 @@ func TestBuildInputRequiredAlert(t *testing.T) {
 	}
 	if !strings.Contains(msg, "/tmp/project") {
 		t.Fatalf("project path missing: %q", msg)
+	}
+}
+
+func TestFormatDoctorRepairOutcome(t *testing.T) {
+	t.Parallel()
+
+	out := formatDoctorRepairOutcome(telegramDoctorRepairOutcome{
+		Actions: []ralph.DoctorRepairAction{
+			{Name: "layout", Status: "pass", Detail: "ok"},
+			{Name: "recover-in-progress", Status: "warn", Detail: "skipped"},
+		},
+		RecoveredInProgress:  2,
+		RetriedBlockedCodex:  1,
+		CircuitReset:         true,
+		DaemonState:          "running(general_pid=123)",
+		DaemonChanged:        "ralph-loop started (pid=123)",
+		CircuitFailures:      0,
+		DoctorPass:           10,
+		DoctorWarn:           1,
+		DoctorFail:           0,
+		InputRequired:        true,
+		InputRequiredHint:    "add issue (`./ralph new ...`)",
+		LastFailureCause:     "codex_failed_after_3_attempts: codex_exit_1",
+		LastFailureUpdatedAt: "2026-02-22T03:01:15Z",
+	})
+
+	for _, token := range []string{
+		"doctor repair completed",
+		"- recovered_in_progress: 2",
+		"- retried_blocked_codex: 1",
+		"- circuit_reset: true",
+		"- daemon: running(general_pid=123)",
+		"- doctor_after: pass=10 warn=1 fail=0",
+		"- input_required: true",
+		"- [warn] recover-in-progress: skipped",
+	} {
+		if !strings.Contains(out, token) {
+			t.Fatalf("formatDoctorRepairOutcome missing token %q in output: %q", token, out)
+		}
 	}
 }
 
