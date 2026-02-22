@@ -63,10 +63,7 @@ func analyzeTelegramTaskIntakeWithCodex(paths ralph.Paths, chatID int64, input s
 		return telegramTaskIntake{}, fmt.Errorf("codex intake disabled (require_codex=false)")
 	}
 
-	timeoutSec := profile.CodexExecTimeoutSec
-	if timeoutSec <= 0 || timeoutSec > 120 {
-		timeoutSec = 90
-	}
+	timeoutSec := resolveTelegramCodexTimeoutSec(profile.CodexExecTimeoutSec, 90)
 	retryAttempts := profile.CodexRetryMaxAttempts
 	if retryAttempts <= 0 {
 		retryAttempts = 1

@@ -113,10 +113,7 @@ func analyzeTelegramChatWithCodex(paths ralph.Paths, chatID int64, input string)
 		return "", fmt.Errorf("codex chat disabled (require_codex=false)")
 	}
 
-	timeoutSec := profile.CodexExecTimeoutSec
-	if timeoutSec <= 0 || timeoutSec > 300 {
-		timeoutSec = 180
-	}
+	timeoutSec := resolveTelegramCodexTimeoutSec(profile.CodexExecTimeoutSec, 180)
 	retryAttempts := profile.CodexRetryMaxAttempts
 	if retryAttempts <= 0 {
 		retryAttempts = 1

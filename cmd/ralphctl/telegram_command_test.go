@@ -303,6 +303,37 @@ func TestSaveLoadTelegramCLIConfig(t *testing.T) {
 	}
 }
 
+func TestDefaultTelegramCLIConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultTelegramCLIConfig()
+	if cfg.CommandTimeoutSec != 900 {
+		t.Fatalf("default command timeout mismatch: got=%d want=900", cfg.CommandTimeoutSec)
+	}
+}
+
+func TestDedupeTelegramAlerts(t *testing.T) {
+	t.Parallel()
+
+	in := []string{
+		"[ralph alert][blocked]\n- project: a",
+		"[ralph alert][blocked]\n- project: a",
+		" ",
+		"[ralph alert][retry]\n- project: a",
+		"[ralph alert][retry]\n- project: a",
+	}
+	out := dedupeTelegramAlerts(in)
+	if len(out) != 2 {
+		t.Fatalf("dedupe result length mismatch: got=%d want=2", len(out))
+	}
+	if !strings.Contains(out[0], "[blocked]") {
+		t.Fatalf("first alert mismatch: %q", out[0])
+	}
+	if !strings.Contains(out[1], "[retry]") {
+		t.Fatalf("second alert mismatch: %q", out[1])
+	}
+}
+
 func TestBuildStatusAlerts(t *testing.T) {
 	t.Parallel()
 

@@ -27,10 +27,7 @@ func analyzeTelegramPRDTurnWithCodex(paths ralph.Paths, session telegramPRDSessi
 	if !profile.RequireCodex {
 		return telegramPRDCodexTurnResponse{}, fmt.Errorf("codex turn disabled (require_codex=false)")
 	}
-	timeoutSec := profile.CodexExecTimeoutSec
-	if timeoutSec <= 0 || timeoutSec > 120 {
-		timeoutSec = telegramPRDCodexAssistTimeoutSec
-	}
+	timeoutSec := resolveTelegramCodexTimeoutSec(profile.CodexExecTimeoutSec, telegramPRDCodexAssistTimeoutSec)
 	retryAttempts := profile.CodexRetryMaxAttempts
 	if retryAttempts <= 0 {
 		retryAttempts = 1
@@ -172,10 +169,7 @@ func estimateTelegramPRDStoryPriorityWithCodex(paths ralph.Paths, session telegr
 	if !profile.RequireCodex {
 		return 0, "", fmt.Errorf("codex priority disabled (require_codex=false)")
 	}
-	timeoutSec := profile.CodexExecTimeoutSec
-	if timeoutSec <= 0 || timeoutSec > 120 {
-		timeoutSec = telegramPRDCodexAssistTimeoutSec
-	}
+	timeoutSec := resolveTelegramCodexTimeoutSec(profile.CodexExecTimeoutSec, telegramPRDCodexAssistTimeoutSec)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
@@ -298,10 +292,7 @@ func analyzeTelegramPRDScoreWithCodex(paths ralph.Paths, session telegramPRDSess
 	if !profile.RequireCodex {
 		return telegramPRDCodexScoreResponse{}, fmt.Errorf("codex scoring disabled (require_codex=false)")
 	}
-	timeoutSec := profile.CodexExecTimeoutSec
-	if timeoutSec <= 0 || timeoutSec > 120 {
-		timeoutSec = telegramPRDCodexAssistTimeoutSec
-	}
+	timeoutSec := resolveTelegramCodexTimeoutSec(profile.CodexExecTimeoutSec, telegramPRDCodexAssistTimeoutSec)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
@@ -384,10 +375,7 @@ func analyzeTelegramPRDRefineWithCodex(paths ralph.Paths, session telegramPRDSes
 	if !profile.RequireCodex {
 		return telegramPRDCodexRefineResponse{}, fmt.Errorf("codex refine disabled (require_codex=false)")
 	}
-	timeoutSec := profile.CodexExecTimeoutSec
-	if timeoutSec <= 0 || timeoutSec > 120 {
-		timeoutSec = telegramPRDCodexAssistTimeoutSec
-	}
+	timeoutSec := resolveTelegramCodexTimeoutSec(profile.CodexExecTimeoutSec, telegramPRDCodexAssistTimeoutSec)
 	retryAttempts := profile.CodexRetryMaxAttempts
 	if retryAttempts <= 0 {
 		retryAttempts = 1

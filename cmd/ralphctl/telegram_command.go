@@ -451,7 +451,7 @@ func defaultTelegramCLIConfig() telegramCLIConfig {
 		NotifyIntervalSec:         30,
 		NotifyRetryThreshold:      2,
 		NotifyPermStreakThreshold: 3,
-		CommandTimeoutSec:         300,
+		CommandTimeoutSec:         900,
 		CommandConcurrency:        4,
 	}
 }
@@ -1194,6 +1194,8 @@ func newFleetStatusNotifyHandler(controlDir string, defaultPaths ralph.Paths, re
 			FullName string
 		}
 		targets := make([]notifyProject, 0, len(cfg.Projects))
+		seenTargetIDs := map[string]struct{}{}
+		seenTargetDirs := map[string]struct{}{}
 		if len(cfg.Projects) == 0 {
 			targets = append(targets, notifyProject{
 				ID:       "current",
@@ -1205,6 +1207,24 @@ func newFleetStatusNotifyHandler(controlDir string, defaultPaths ralph.Paths, re
 				projectPaths, err := ralph.NewPaths(controlDir, p.ProjectDir)
 				if err != nil {
 					return nil, err
+				}
+				idKey := strings.TrimSpace(p.ID)
+				dirKey := strings.TrimSpace(filepath.Clean(projectPaths.ProjectDir))
+				if idKey != "" {
+					if _, exists := seenTargetIDs[idKey]; exists {
+						continue
+					}
+				}
+				if dirKey != "" {
+					if _, exists := seenTargetDirs[dirKey]; exists {
+						continue
+					}
+				}
+				if idKey != "" {
+					seenTargetIDs[idKey] = struct{}{}
+				}
+				if dirKey != "" {
+					seenTargetDirs[dirKey] = struct{}{}
 				}
 				targets = append(targets, notifyProject{
 					ID:       p.ID,
@@ -1248,7 +1268,7 @@ func newFleetStatusNotifyHandler(controlDir string, defaultPaths ralph.Paths, re
 			initialized = true
 			return nil, nil
 		}
-		return alerts, nil
+		return dedupeTelegramAlerts(alerts), nil
 	}
 }
 
@@ -1276,8 +1296,28 @@ func newStatusNotifyHandler(paths ralph.Paths, retryThreshold, permThreshold int
 			lastInputRequiredAlertAt = time.Time{}
 		}
 		prev = current
-		return alerts, nil
+		return dedupeTelegramAlerts(alerts), nil
 	}
+}
+
+func dedupeTelegramAlerts(alerts []string) []string {
+	if len(alerts) <= 1 {
+		return alerts
+	}
+	seen := make(map[string]struct{}, len(alerts))
+	out := make([]string, 0, len(alerts))
+	for _, alert := range alerts {
+		key := strings.TrimSpace(alert)
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, alert)
+	}
+	return out
 }
 
 func buildStatusAlerts(prev, current ralph.Status, retryThreshold, permThreshold int) []string {
