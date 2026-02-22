@@ -80,6 +80,7 @@ ralphctl --project-dir "$PWD" setup
 ```bash
 ./ralph doctor --repair
 ./ralph recover
+./ralph retry-blocked --reason codex_failed_after
 ```
 
 ## 활용방법
@@ -122,6 +123,14 @@ PRD JSON 일괄 생성:
 - `.ralph/done/`: 완료 이슈
 - `.ralph/blocked/`: 실패/검토 필요 이슈
 - `.ralph/logs/`: 실행 로그
+
+blocked 이슈 재시도:
+
+```bash
+./ralph retry-blocked
+./ralph retry-blocked --reason codex_failed_after
+./ralph retry-blocked --reason codex_permission_denied --limit 1
+```
 
 ## advanced
 
@@ -237,7 +246,7 @@ ralphctl --project-dir "$PWD" telegram setup --non-interactive \
 - 평문 메시지: 프로젝트 컨텍스트 Codex 대화 (예: `결제 PRD 초안 만들어줘`)
 - `/chat <message>`: Codex 대화를 명시적으로 실행
 - `/chat status`, `/chat reset`: Codex 대화 컨텍스트 확인/초기화
-- (`--allow-control`일 때) `/start|/stop|/restart|/doctor_repair|/recover [all|<project_id>]`
+- (`--allow-control`일 때) `/start|/stop|/restart|/doctor_repair|/recover|/retry_blocked [all|<project_id>]`
 - (`--allow-control`일 때) `/new [manager|planner|developer|qa] <title>` (role 생략 시 developer)
 - (`--allow-control`일 때) `/task <자연어 요청>` (Codex가 role/title/objective/acceptance를 구조화해 이슈 생성)
 - (`--allow-control`일 때) `/prd help` (대화형 PRD wizard + clarity refine)
@@ -266,6 +275,7 @@ PRD wizard 빠른 흐름:
 
 ```yaml
 codex_model: auto
+codex_home: .codex-home
 codex_exec_timeout_sec: 900
 codex_retry_max_attempts: 3
 codex_retry_backoff_sec: 10
@@ -282,6 +292,9 @@ inprogress_watchdog_stale_sec: 1800
 inprogress_watchdog_scan_loops: 1
 ```
 
+`codex_home` 기본값은 프로젝트 로컬 `./.codex-home`입니다.
+로그인/설정 파일(`auth.json`, `config.toml`)은 필요 시 자동 시드됩니다.
+
 반영 확인:
 
 ```bash
@@ -289,6 +302,14 @@ inprogress_watchdog_scan_loops: 1
 ```
 
 `last_profile_reload_at`, `profile_reload_count`가 업데이트됩니다.
+
+Codex 네트워크 문제가 의심되면:
+
+```bash
+./ralph doctor
+```
+
+`network:dns:chatgpt.com`, `network:codex-api`, `codex-home` 체크를 확인하세요.
 
 주의:
 

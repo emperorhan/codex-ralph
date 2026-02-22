@@ -42,7 +42,7 @@ func run() error {
 
 	global.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: ralphctl [--control-dir DIR] [--project-dir DIR] <command> [args]")
-		fmt.Fprintln(os.Stderr, "Commands: list-plugins, install, apply-plugin, registry, setup, reload, init, on, off, new, intake, import-prd, recover, doctor, run, supervise, start, stop, restart, status, tail, service, fleet, telegram")
+		fmt.Fprintln(os.Stderr, "Commands: list-plugins, install, apply-plugin, registry, setup, reload, init, on, off, new, intake, import-prd, recover, retry-blocked, doctor, run, supervise, start, stop, restart, status, tail, service, fleet, telegram")
 	}
 
 	if err := global.Parse(os.Args[1:]); err != nil {
@@ -322,6 +322,29 @@ func run() error {
 			return err
 		}
 		fmt.Printf("recovered in-progress issues: %d\n", recovered)
+		return nil
+
+	case "retry-blocked":
+		fs := flag.NewFlagSet("retry-blocked", flag.ContinueOnError)
+		reason := fs.String("reason", "", "retry only blocked issues whose latest reason contains this text")
+		limit := fs.Int("limit", 0, "max number of blocked issues to move to ready (0=all)")
+		if err := fs.Parse(cmdArgs); err != nil {
+			return err
+		}
+		if *limit < 0 {
+			return fmt.Errorf("--limit must be >= 0")
+		}
+		moved, err := ralph.RetryBlockedIssues(paths, *reason, *limit)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("retried blocked issues: %d\n", moved)
+		if strings.TrimSpace(*reason) != "" {
+			fmt.Printf("- reason_filter: %s\n", strings.TrimSpace(*reason))
+		}
+		if *limit > 0 {
+			fmt.Printf("- limit: %d\n", *limit)
+		}
 		return nil
 
 	case "doctor":

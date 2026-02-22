@@ -800,6 +800,11 @@ func runSingleCodexAttempt(ctx context.Context, paths Paths, profile Profile, mo
 	}
 	defer cancel()
 
+	codexHome, err := EnsureCodexHome(paths, profile)
+	if err != nil {
+		return fmt.Errorf("codex_home_error: %w", err), false
+	}
+
 	args := []string{
 		"--ask-for-approval", profile.CodexApproval,
 		"exec",
@@ -819,6 +824,7 @@ func runSingleCodexAttempt(ctx context.Context, paths Paths, profile Profile, mo
 	args = append(args, "-")
 
 	codexCmd := exec.CommandContext(cmdCtx, "codex", args...)
+	codexCmd.Env = EnvWithCodexHome(os.Environ(), codexHome)
 	tail := newTailBuffer(64 * 1024)
 	codexCmd.Stdout = io.MultiWriter(logFile, tail)
 	codexCmd.Stderr = io.MultiWriter(logFile, tail)
@@ -1008,6 +1014,21 @@ func classifyCodexFailure(exitCode int, outputLower string) (string, bool) {
 	}
 	if hasAnySubstring(outputLower, modelMarkers...) {
 		return "codex_model_error", false
+	}
+
+	networkMarkers := []string{
+		"stream disconnected",
+		"could not resolve host",
+		"temporary failure in name resolution",
+		"connection refused",
+		"connection reset",
+		"i/o timeout",
+		"tls handshake timeout",
+		"no such host",
+		"network is unreachable",
+	}
+	if hasAnySubstring(outputLower, networkMarkers...) {
+		return "", true
 	}
 
 	permissionMarkers := []string{

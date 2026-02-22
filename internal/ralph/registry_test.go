@@ -79,6 +79,7 @@ func TestApplyStabilityDefaults(t *testing.T) {
 		t.Fatalf("read profile.local.yaml: %v", err)
 	}
 	assertMapValue(t, values, "codex_exec_timeout_sec", "900")
+	assertMapValue(t, values, "codex_home", ".codex-home")
 	assertMapValue(t, values, "codex_retry_max_attempts", "3")
 	assertMapValue(t, values, "codex_retry_backoff_sec", "10")
 	assertMapValue(t, values, "inprogress_watchdog_enabled", "true")

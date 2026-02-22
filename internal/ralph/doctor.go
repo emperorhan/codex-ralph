@@ -1,8 +1,11 @@
 package ralph
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -133,7 +136,18 @@ func RunDoctor(paths Paths) (DoctorReport, error) {
 			report.add("command:codex", doctorStatusFail, "codex command required but not found")
 		} else {
 			report.add("command:codex", doctorStatusPass, "codex command available")
-			authOut, authErr := exec.Command("codex", "login", "status").CombinedOutput()
+			codexHome, codexHomeErr := EnsureCodexHome(paths, profile)
+			if codexHomeErr != nil {
+				report.add("codex-home", doctorStatusFail, compactLoopText(codexHomeErr.Error(), 160))
+			} else {
+				report.add("codex-home", doctorStatusPass, codexHome)
+			}
+
+			authCmd := exec.Command("codex", "login", "status")
+			if codexHomeErr == nil && strings.TrimSpace(codexHome) != "" {
+				authCmd.Env = EnvWithCodexHome(os.Environ(), codexHome)
+			}
+			authOut, authErr := authCmd.CombinedOutput()
 			authSummary := firstNonEmptyLine(string(authOut))
 			if strings.TrimSpace(authSummary) == "" {
 				authSummary = "status unavailable"
@@ -143,6 +157,7 @@ func RunDoctor(paths Paths) (DoctorReport, error) {
 			} else {
 				report.add("auth:codex", doctorStatusPass, authSummary)
 			}
+			appendCodexNetworkChecks(&report)
 		}
 	} else {
 		report.add("command:codex", doctorStatusWarn, "RALPH_REQUIRE_CODEX=false (codex execution disabled)")
@@ -531,4 +546,53 @@ func checkDirectoryWritable(report *DoctorReport, checkName, dir string) {
 	_ = f.Close()
 	_ = os.Remove(name)
 	report.add(checkName, doctorStatusPass, "writable")
+}
+
+func appendCodexNetworkChecks(report *DoctorReport) {
+	if report == nil {
+		return
+	}
+	if isTruthyEnv("RALPH_DOCTOR_SKIP_CODEX_NETWORK_CHECK") {
+		report.add("network:codex", doctorStatusPass, "skipped (RALPH_DOCTOR_SKIP_CODEX_NETWORK_CHECK=true)")
+		return
+	}
+
+	dnsCtx, dnsCancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer dnsCancel()
+	ips, dnsErr := net.DefaultResolver.LookupIPAddr(dnsCtx, "chatgpt.com")
+	if dnsErr != nil {
+		report.add("network:dns:chatgpt.com", doctorStatusWarn, compactLoopText(dnsErr.Error(), 180))
+		return
+	}
+	report.add("network:dns:chatgpt.com", doctorStatusPass, fmt.Sprintf("resolved %d ip(s)", len(ips)))
+
+	httpCtx, httpCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer httpCancel()
+	req, err := http.NewRequestWithContext(httpCtx, http.MethodHead, "https://chatgpt.com/backend-api/codex/models?client_version=0.104.0", nil)
+	if err != nil {
+		report.add("network:codex-api", doctorStatusWarn, compactLoopText(err.Error(), 180))
+		return
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, reqErr := client.Do(req)
+	if reqErr != nil {
+		report.add("network:codex-api", doctorStatusWarn, compactLoopText(reqErr.Error(), 180))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 500 {
+		report.add("network:codex-api", doctorStatusPass, fmt.Sprintf("reachable (status=%d)", resp.StatusCode))
+		return
+	}
+	report.add("network:codex-api", doctorStatusWarn, fmt.Sprintf("unexpected status=%d", resp.StatusCode))
+}
+
+func isTruthyEnv(key string) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch v {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }

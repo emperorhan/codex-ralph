@@ -50,7 +50,7 @@ func analyzeTelegramPRDTurnWithCodex(paths ralph.Paths, session telegramPRDSessi
 	var lastErr error
 	for attempt := 1; attempt <= retryAttempts; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
-		raw, execErr := runTelegramPRDCodexExec(ctx, paths, profile.CodexApproval, profile.CodexSandbox, model, prompt, "ralph-telegram-prd-turn-*")
+		raw, execErr := runTelegramPRDCodexExec(ctx, paths, profile, model, prompt, "ralph-telegram-prd-turn-*")
 		cancel()
 		if execErr == nil {
 			parsed, parseErr := parseTelegramPRDCodexTurnResponse(raw)
@@ -173,44 +173,14 @@ func estimateTelegramPRDStoryPriorityWithCodex(paths ralph.Paths, session telegr
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
-	tmpDir, err := os.MkdirTemp("", "ralph-telegram-prd-priority-*")
-	if err != nil {
-		return 0, "", err
-	}
-	defer os.RemoveAll(tmpDir)
-	outPath := filepath.Join(tmpDir, "assistant-last-message.txt")
-
 	model := strings.TrimSpace(profile.CodexModelForRole("planner"))
-	args := []string{
-		"--ask-for-approval", profile.CodexApproval,
-		"exec",
-		"--sandbox", profile.CodexSandbox,
-	}
-	if model != "" {
-		args = append(args, "--model", model)
-	}
-	args = append(args,
-		"--cd", paths.ProjectDir,
-		"--skip-git-repo-check",
-		"--output-last-message", outPath,
-		"-",
-	)
-
 	conversationTail := readTelegramPRDConversationTail(paths, session.ChatID, 3000)
 	prompt := buildTelegramPRDStoryPriorityPrompt(session, story, conversationTail)
-	cmd := exec.CommandContext(ctx, "codex", args...)
-	cmd.Stdin = strings.NewReader(prompt)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err != nil {
+	raw, err := runTelegramPRDCodexExec(ctx, paths, profile, model, prompt, "ralph-telegram-prd-priority-*")
+	if err != nil {
 		return 0, "", err
 	}
-
-	raw, err := os.ReadFile(outPath)
-	if err != nil {
-		return 0, "", fmt.Errorf("read codex priority output: %w", err)
-	}
-	parsed, err := parseTelegramPRDCodexStoryPriorityResponse(string(raw))
+	parsed, err := parseTelegramPRDCodexStoryPriorityResponse(raw)
 	if err != nil {
 		return 0, "", err
 	}
@@ -296,43 +266,15 @@ func analyzeTelegramPRDScoreWithCodex(paths ralph.Paths, session telegramPRDSess
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
-	tmpDir, err := os.MkdirTemp("", "ralph-telegram-prd-score-*")
-	if err != nil {
-		return telegramPRDCodexScoreResponse{}, err
-	}
-	defer os.RemoveAll(tmpDir)
-	outPath := filepath.Join(tmpDir, "assistant-last-message.txt")
-
 	model := strings.TrimSpace(profile.CodexModelForRole("planner"))
-	args := []string{
-		"--ask-for-approval", profile.CodexApproval,
-		"exec",
-		"--sandbox", profile.CodexSandbox,
-	}
-	if model != "" {
-		args = append(args, "--model", model)
-	}
-	args = append(args,
-		"--cd", paths.ProjectDir,
-		"--skip-git-repo-check",
-		"--output-last-message", outPath,
-		"-",
-	)
 
 	conversationTail := readTelegramPRDConversationTail(paths, session.ChatID, 4000)
 	prompt := buildTelegramPRDScorePrompt(session, conversationTail)
-	cmd := exec.CommandContext(ctx, "codex", args...)
-	cmd.Stdin = strings.NewReader(prompt)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err != nil {
+	raw, err := runTelegramPRDCodexExec(ctx, paths, profile, model, prompt, "ralph-telegram-prd-score-*")
+	if err != nil {
 		return telegramPRDCodexScoreResponse{}, err
 	}
-	raw, err := os.ReadFile(outPath)
-	if err != nil {
-		return telegramPRDCodexScoreResponse{}, fmt.Errorf("read codex score output: %w", err)
-	}
-	return parseTelegramPRDCodexScoreResponse(string(raw))
+	return parseTelegramPRDCodexScoreResponse(raw)
 }
 
 func refreshTelegramPRDScoreWithCodex(paths ralph.Paths, session telegramPRDSession) (telegramPRDSession, bool, error) {
@@ -397,7 +339,7 @@ func analyzeTelegramPRDRefineWithCodex(paths ralph.Paths, session telegramPRDSes
 	var lastErr error
 	for attempt := 1; attempt <= retryAttempts; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
-		raw, execErr := runTelegramPRDCodexExec(ctx, paths, profile.CodexApproval, profile.CodexSandbox, model, prompt, "ralph-telegram-prd-refine-*")
+		raw, execErr := runTelegramPRDCodexExec(ctx, paths, profile, model, prompt, "ralph-telegram-prd-refine-*")
 		cancel()
 		if execErr == nil {
 			parsed, parseErr := parseTelegramPRDCodexRefineResponse(raw)
@@ -418,8 +360,7 @@ func analyzeTelegramPRDRefineWithCodex(paths ralph.Paths, session telegramPRDSes
 func runTelegramPRDCodexExec(
 	ctx context.Context,
 	paths ralph.Paths,
-	approval string,
-	sandbox string,
+	profile ralph.Profile,
 	model string,
 	prompt string,
 	tmpPrefix string,
@@ -432,9 +373,9 @@ func runTelegramPRDCodexExec(
 
 	outPath := filepath.Join(tmpDir, "assistant-last-message.txt")
 	args := []string{
-		"--ask-for-approval", approval,
+		"--ask-for-approval", profile.CodexApproval,
 		"exec",
-		"--sandbox", sandbox,
+		"--sandbox", profile.CodexSandbox,
 	}
 	if strings.TrimSpace(model) != "" {
 		args = append(args, "--model", model)
@@ -447,6 +388,11 @@ func runTelegramPRDCodexExec(
 	)
 
 	cmd := exec.CommandContext(ctx, "codex", args...)
+	codexHome, ensureErr := ralph.EnsureCodexHome(paths, profile)
+	if ensureErr != nil {
+		return "", fmt.Errorf("prepare codex home: %w", ensureErr)
+	}
+	cmd.Env = ralph.EnvWithCodexHome(os.Environ(), codexHome)
 	cmd.Stdin = strings.NewReader(sanitizeTelegramUTF8String(prompt))
 	cmd.Stdout = io.Discard
 	var stderr bytes.Buffer

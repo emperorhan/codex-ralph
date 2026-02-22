@@ -178,6 +178,32 @@ func TestProfileToYAMLMapRoleModels(t *testing.T) {
 	}
 }
 
+func TestLoadProfileCodexHome(t *testing.T) {
+	paths := newTestPaths(t)
+	resetProfileEnv(t)
+
+	writeFile(t, paths.ProfileYAMLFile, `
+codex_home: .codex-home-yaml
+`)
+	writeFile(t, paths.ProfileLocalFile, `
+RALPH_CODEX_HOME=.codex-home-local-env
+`)
+	t.Setenv("RALPH_CODEX_HOME", ".codex-home-process")
+
+	profile, err := LoadProfile(paths)
+	if err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+	if profile.CodexHome != ".codex-home-process" {
+		t.Fatalf("codex_home mismatch: got=%q want=%q", profile.CodexHome, ".codex-home-process")
+	}
+
+	m := ProfileToYAMLMap(profile)
+	if m["codex_home"] != ".codex-home-process" {
+		t.Fatalf("codex_home yaml map mismatch: got=%q want=%q", m["codex_home"], ".codex-home-process")
+	}
+}
+
 func TestCodexModelForRoleAutoBehavior(t *testing.T) {
 	profile := DefaultProfile()
 	if got := profile.CodexModelForRole("developer"); got != "" {

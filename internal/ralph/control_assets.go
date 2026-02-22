@@ -91,6 +91,7 @@ func builtinPluginEnv(pluginName, validateCmd string) string {
 	lines := []string{
 		"RALPH_PLUGIN_NAME=" + pluginName,
 		"RALPH_CODEX_MODEL=auto",
+		"RALPH_CODEX_HOME=.codex-home",
 		"RALPH_CODEX_SANDBOX=workspace-write",
 		"RALPH_CODEX_APPROVAL=never",
 		"RALPH_CODEX_EXEC_TIMEOUT_SEC=900",

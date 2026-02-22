@@ -249,6 +249,7 @@ func ApplyStabilityDefaults(paths Paths) error {
 	}
 
 	setProfileConfigValue(existing, "codex_exec_timeout_sec", "900", "RALPH_CODEX_EXEC_TIMEOUT_SEC")
+	setProfileConfigValue(existing, "codex_home", ".codex-home", "RALPH_CODEX_HOME")
 	setProfileConfigValue(existing, "codex_retry_max_attempts", "3", "RALPH_CODEX_RETRY_MAX_ATTEMPTS")
 	setProfileConfigValue(existing, "codex_retry_backoff_sec", "10", "RALPH_CODEX_RETRY_BACKOFF_SEC")
 	setProfileConfigValue(existing, "codex_skip_git_repo_check", "true", "RALPH_CODEX_SKIP_GIT_REPO_CHECK")

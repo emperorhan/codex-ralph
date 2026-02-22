@@ -171,6 +171,65 @@ func TestParseTelegramTargetSpec(t *testing.T) {
 	}
 }
 
+func TestParseTelegramRetryBlockedArgs(t *testing.T) {
+	t.Parallel()
+
+	controlDir := filepath.Join(t.TempDir(), "control")
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("mkdir control dir: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	cfg := ralph.FleetConfig{
+		Projects: []ralph.FleetProject{
+			{
+				ID:            "wallet",
+				ProjectDir:    projectDir,
+				Plugin:        "universal-default",
+				AssignedRoles: append([]string(nil), ralph.RequiredAgentRoles...),
+				CreatedAtUTC:  time.Now().UTC().Format(time.RFC3339),
+			},
+		},
+	}
+	if err := ralph.SaveFleetConfig(controlDir, cfg); err != nil {
+		t.Fatalf("save fleet config: %v", err)
+	}
+
+	spec, reason, err := parseTelegramRetryBlockedArgs(controlDir, "")
+	if err != nil {
+		t.Fatalf("empty parse failed: %v", err)
+	}
+	if spec.HasTarget() || reason != "" {
+		t.Fatalf("empty parse mismatch: spec=%+v reason=%q", spec, reason)
+	}
+
+	spec, reason, err = parseTelegramRetryBlockedArgs(controlDir, "all codex_permission_denied")
+	if err != nil {
+		t.Fatalf("all parse failed: %v", err)
+	}
+	if !spec.All || reason != "codex_permission_denied" {
+		t.Fatalf("all parse mismatch: spec=%+v reason=%q", spec, reason)
+	}
+
+	spec, reason, err = parseTelegramRetryBlockedArgs(controlDir, "wallet")
+	if err != nil {
+		t.Fatalf("project parse failed: %v", err)
+	}
+	if spec.ProjectID != "wallet" || reason != "" {
+		t.Fatalf("project parse mismatch: spec=%+v reason=%q", spec, reason)
+	}
+
+	spec, reason, err = parseTelegramRetryBlockedArgs(controlDir, "network")
+	if err != nil {
+		t.Fatalf("reason parse failed: %v", err)
+	}
+	if spec.HasTarget() || reason != "network" {
+		t.Fatalf("reason parse mismatch: spec=%+v reason=%q", spec, reason)
+	}
+}
+
 func TestNormalizeNotifyScope(t *testing.T) {
 	t.Parallel()
 

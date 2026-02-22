@@ -276,6 +276,55 @@ func RecoverInProgress(paths Paths) error {
 	return err
 }
 
+func RetryBlockedIssues(paths Paths, reasonContains string, limit int) (int, error) {
+	files, err := filepath.Glob(filepath.Join(paths.BlockedDir, "I-*.md"))
+	if err != nil {
+		return 0, err
+	}
+	sort.Strings(files)
+
+	filter := strings.ToLower(strings.TrimSpace(reasonContains))
+	moved := 0
+	for _, f := range files {
+		if limit > 0 && moved >= limit {
+			break
+		}
+		if _, statErr := os.Stat(f); os.IsNotExist(statErr) {
+			continue
+		}
+
+		if filter != "" {
+			reason, readErr := latestIssueResultReason(f)
+			if readErr != nil {
+				return moved, readErr
+			}
+			if !strings.Contains(strings.ToLower(reason), filter) {
+				continue
+			}
+		}
+
+		base := filepath.Base(f)
+		dst := filepath.Join(paths.IssuesDir, base)
+		if _, statErr := os.Stat(dst); statErr == nil {
+			dst = filepath.Join(paths.IssuesDir, "retried-"+base)
+		}
+		if err := SetIssueStatus(f, "ready"); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return moved, err
+		}
+		if err := os.Rename(f, dst); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return moved, err
+		}
+		moved++
+	}
+	return moved, nil
+}
+
 func RecoverInProgressWithCount(paths Paths) (int, error) {
 	files, err := filepath.Glob(filepath.Join(paths.InProgressDir, "I-*.md"))
 	if err != nil {
@@ -307,6 +356,21 @@ func RecoverInProgressWithCount(paths Paths) (int, error) {
 		moved++
 	}
 	return moved, nil
+}
+
+func latestIssueResultReason(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	reason := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- reason:") {
+			reason = strings.TrimSpace(strings.TrimPrefix(trimmed, "- reason:"))
+		}
+	}
+	return reason, nil
 }
 
 func RecoverStaleInProgressWithCount(paths Paths, staleAfter time.Duration) (int, error) {

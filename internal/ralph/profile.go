@@ -14,6 +14,7 @@ type Profile struct {
 	CodexModelPlanner              string
 	CodexModelDeveloper            string
 	CodexModelQA                   string
+	CodexHome                      string
 	CodexSandbox                   string
 	CodexApproval                  string
 	CodexSkipGitRepoCheck          bool
@@ -248,6 +249,8 @@ func profileConfigEnvKey(rawKey string) string {
 		return "RALPH_CODEX_MODEL_DEVELOPER"
 	case "codex_model_qa", "codex.model_qa":
 		return "RALPH_CODEX_MODEL_QA"
+	case "codex_home", "codex.home":
+		return "RALPH_CODEX_HOME"
 	case "codex_sandbox", "codex.sandbox":
 		return "RALPH_CODEX_SANDBOX"
 	case "codex_approval", "codex.approval":
@@ -367,6 +370,9 @@ func ProfileToYAMLMap(p Profile) map[string]string {
 		"supervisor_enabled":                 boolToEnv(p.SupervisorEnabled),
 		"supervisor_restart_delay_sec":       strconv.Itoa(p.SupervisorRestartDelaySec),
 	}
+	if v := strings.TrimSpace(p.CodexHome); v != "" {
+		out["codex_home"] = v
+	}
 	if v := strings.TrimSpace(p.CodexModelManager); v != "" {
 		out["codex_model_manager"] = v
 	}
@@ -400,6 +406,9 @@ func applyProfileMap(p *Profile, m map[string]string) {
 	}
 	if v := m["RALPH_CODEX_MODEL_QA"]; v != "" {
 		p.CodexModelQA = v
+	}
+	if v := m["RALPH_CODEX_HOME"]; v != "" {
+		p.CodexHome = v
 	}
 	if v := m["RALPH_CODEX_SANDBOX"]; v != "" {
 		p.CodexSandbox = v

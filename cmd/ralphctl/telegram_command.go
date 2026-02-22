@@ -59,7 +59,7 @@ func runTelegramRunCommand(controlDir string, paths ralph.Paths, args []string) 
 	token := fs.String("token", firstNonEmpty(strings.TrimSpace(os.Getenv("RALPH_TELEGRAM_BOT_TOKEN")), cfg.Token), "telegram bot token")
 	chatIDsRaw := fs.String("chat-ids", firstNonEmpty(strings.TrimSpace(os.Getenv("RALPH_TELEGRAM_CHAT_IDS")), cfg.ChatIDs), "allowed chat IDs CSV (required)")
 	userIDsRaw := fs.String("user-ids", firstNonEmpty(strings.TrimSpace(os.Getenv("RALPH_TELEGRAM_USER_IDS")), cfg.UserIDs), "allowed user IDs CSV (optional; recommended for group chats)")
-	allowControl := fs.Bool("allow-control", envBoolDefault("RALPH_TELEGRAM_ALLOW_CONTROL", cfg.AllowControl), "allow control commands (/start,/stop,/restart,/doctor_repair,/recover)")
+	allowControl := fs.Bool("allow-control", envBoolDefault("RALPH_TELEGRAM_ALLOW_CONTROL", cfg.AllowControl), "allow control commands (/start,/stop,/restart,/doctor_repair,/recover,/retry_blocked)")
 	enableNotify := fs.Bool("notify", envBoolDefault("RALPH_TELEGRAM_NOTIFY", cfg.Notify), "push alerts for blocked/retry/stuck")
 	notifyScope := fs.String("notify-scope", firstNonEmpty(strings.TrimSpace(os.Getenv("RALPH_TELEGRAM_NOTIFY_SCOPE")), cfg.NotifyScope), "notify scope: project|fleet|auto")
 	notifyIntervalSec := fs.Int("notify-interval-sec", envIntDefault("RALPH_TELEGRAM_NOTIFY_INTERVAL_SEC", cfg.NotifyIntervalSec), "status poll interval for notify alerts")
@@ -632,6 +632,12 @@ func dispatchTelegramCommand(controlDir string, paths ralph.Paths, allowControl 
 		}
 		return telegramRecoverCommand(controlDir, paths, cmdArgs)
 
+	case "/retry_blocked":
+		if !allowControl {
+			return "control commands are disabled (run with --allow-control)", nil
+		}
+		return telegramRetryBlockedCommand(controlDir, paths, cmdArgs)
+
 	case "/new", "/issue":
 		if !allowControl {
 			return "control commands are disabled (run with --allow-control)", nil
@@ -889,6 +895,71 @@ func telegramRecoverCommand(controlDir string, paths ralph.Paths, rawArgs string
 	return b.String(), nil
 }
 
+func telegramRetryBlockedCommand(controlDir string, paths ralph.Paths, rawArgs string) (string, error) {
+	spec, reason, err := parseTelegramRetryBlockedArgs(controlDir, rawArgs)
+	if err != nil {
+		return "", err
+	}
+	if !spec.HasTarget() {
+		moved, err := ralph.RetryBlockedIssues(paths, reason, 0)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(reason) == "" {
+			return fmt.Sprintf("retried blocked issues: %d", moved), nil
+		}
+		return fmt.Sprintf("retried blocked issues: %d\n- reason_filter: %s", moved, reason), nil
+	}
+	projects, pathsByID, err := resolveTelegramFleetPaths(controlDir, spec)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	total := 0
+	for _, p := range projects {
+		moved, err := ralph.RetryBlockedIssues(pathsByID[p.ID], reason, 0)
+		if err != nil {
+			fmt.Fprintf(&b, "- project=%s status=fail detail=%s\n", p.ID, compactSingleLine(err.Error(), 160))
+			continue
+		}
+		total += moved
+		fmt.Fprintf(&b, "- project=%s retried=%d\n", p.ID, moved)
+	}
+	fmt.Fprintf(&b, "fleet retry-blocked completed (target=%s total=%d)", spec.Label(), total)
+	if strings.TrimSpace(reason) != "" {
+		fmt.Fprintf(&b, "\n- reason_filter: %s", reason)
+	}
+	return b.String(), nil
+}
+
+func parseTelegramRetryBlockedArgs(controlDir, rawArgs string) (telegramTargetSpec, string, error) {
+	fields := strings.Fields(strings.TrimSpace(rawArgs))
+	if len(fields) == 0 {
+		return telegramTargetSpec{}, "", nil
+	}
+	first := strings.TrimSpace(fields[0])
+	if first == "" {
+		return telegramTargetSpec{}, "", nil
+	}
+	if first == "*" || strings.EqualFold(first, "all") {
+		return telegramTargetSpec{All: true}, strings.TrimSpace(strings.Join(fields[1:], " ")), nil
+	}
+	if len(fields) >= 2 {
+		return telegramTargetSpec{ProjectID: first}, strings.TrimSpace(strings.Join(fields[1:], " ")), nil
+	}
+
+	// Single argument is ambiguous between project id and reason filter.
+	// Prefer project id when it exists in fleet; otherwise treat as reason filter.
+	cfg, err := ralph.LoadFleetConfig(controlDir)
+	if err != nil {
+		return telegramTargetSpec{}, "", err
+	}
+	if _, ok := ralph.FindFleetProject(cfg, first); ok {
+		return telegramTargetSpec{ProjectID: first}, "", nil
+	}
+	return telegramTargetSpec{}, first, nil
+}
+
 func telegramNewIssueCommand(paths ralph.Paths, rawArgs string) (string, error) {
 	role, title, err := parseTelegramNewIssueArgs(rawArgs)
 	if err != nil {
@@ -1001,6 +1072,7 @@ func buildTelegramHelp(allowControl bool) string {
 			"- /restart [all|<project_id>]",
 			"- /doctor_repair [all|<project_id>]",
 			"- /recover [all|<project_id>]",
+			"- /retry_blocked [all|<project_id>] [reason_filter]",
 			"- /new [role] <title> (default role: developer)",
 			"- /task <natural language request> (Codex -> issue)",
 			"",

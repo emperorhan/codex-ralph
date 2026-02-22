@@ -136,7 +136,7 @@ func analyzeTelegramChatWithCodex(paths ralph.Paths, chatID int64, input string)
 	var lastErr error
 	for attempt := 1; attempt <= retryAttempts; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
-		raw, execErr := runTelegramPRDCodexExec(ctx, paths, profile.CodexApproval, profile.CodexSandbox, model, prompt, "ralph-telegram-chat-*")
+		raw, execErr := runTelegramPRDCodexExec(ctx, paths, profile, model, prompt, "ralph-telegram-chat-*")
 		cancel()
 		if execErr == nil {
 			reply := sanitizeTelegramCodexChatReply(raw)

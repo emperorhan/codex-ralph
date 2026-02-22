@@ -193,6 +193,8 @@ func TestClassifyCodexFailure(t *testing.T) {
 		{name: "invalid-args", exitCode: 2, output: "unknown option --foo", want: "codex_invalid_args", retryable: false},
 		{name: "model", exitCode: 1, output: "unknown model gpt-x", want: "codex_model_error", retryable: false},
 		{name: "permission", exitCode: 1, output: "operation not permitted", want: "codex_permission_denied", retryable: false},
+		{name: "network", exitCode: 1, output: "stream disconnected before completion", want: "", retryable: true},
+		{name: "network-overrides-permission", exitCode: 1, output: "operation not permitted ... stream disconnected before completion", want: "", retryable: true},
 		{name: "cancel", exitCode: 130, output: "", want: "codex_canceled", retryable: false},
 		{name: "transient", exitCode: 1, output: "temporary network issue", want: "", retryable: true},
 	}

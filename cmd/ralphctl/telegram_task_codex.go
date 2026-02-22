@@ -86,7 +86,7 @@ func analyzeTelegramTaskIntakeWithCodex(paths ralph.Paths, chatID int64, input s
 	var lastErr error
 	for attempt := 1; attempt <= retryAttempts; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
-		raw, execErr := runTelegramPRDCodexExec(ctx, paths, profile.CodexApproval, profile.CodexSandbox, model, prompt, "ralph-telegram-task-intake-*")
+		raw, execErr := runTelegramPRDCodexExec(ctx, paths, profile, model, prompt, "ralph-telegram-task-intake-*")
 		cancel()
 		if execErr == nil {
 			parsed, parseErr := parseTelegramTaskIntake(raw, input)
