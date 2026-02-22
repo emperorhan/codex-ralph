@@ -1211,6 +1211,8 @@ func classifyTelegramCodexFailure(err error) (string, string) {
 	switch {
 	case strings.Contains(raw, "not found"):
 		return "not_installed", detail
+	case strings.Contains(raw, "no such file or directory"), strings.Contains(raw, "os error 2"):
+		return "file_not_found", detail
 	case strings.Contains(raw, "timeout"), strings.Contains(raw, "deadline exceeded"):
 		return "timeout", detail
 	case strings.Contains(raw, "operation not permitted"), strings.Contains(raw, "permission denied"):

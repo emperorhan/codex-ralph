@@ -145,6 +145,39 @@ func TestShouldDetectBusyWait(t *testing.T) {
 	}
 }
 
+func TestIsLegacyGoDefaultValidateCmd(t *testing.T) {
+	t.Parallel()
+
+	if !isLegacyGoDefaultValidateCmd("make test && make test-sidecar && make lint") {
+		t.Fatalf("expected legacy go-default validate command to match")
+	}
+	if isLegacyGoDefaultValidateCmd("go test ./...") {
+		t.Fatalf("non-legacy validate command should not match")
+	}
+}
+
+func TestShouldFallbackGoDefaultValidation(t *testing.T) {
+	t.Parallel()
+
+	profile := DefaultProfile()
+	profile.PluginName = "go-default"
+	profile.ValidateCmd = "make test && make test-sidecar && make lint"
+
+	if !shouldFallbackGoDefaultValidation(profile, errors.New("exit status 2"), "make: *** no rule to make target 'test-sidecar'. stop.") {
+		t.Fatalf("expected fallback when legacy go-default targets are missing")
+	}
+	if shouldFallbackGoDefaultValidation(profile, errors.New("exit status 1"), "make: *** [test] error 1") {
+		t.Fatalf("should not fallback for regular test failures")
+	}
+	if shouldFallbackGoDefaultValidation(profile, errors.New("exit status 2"), "make: *** [test] error 2") {
+		t.Fatalf("should not fallback without missing-target signal")
+	}
+	profile.PluginName = "universal-default"
+	if shouldFallbackGoDefaultValidation(profile, errors.New("exit status 2"), "no rule to make target") {
+		t.Fatalf("should not fallback for non go-default plugins")
+	}
+}
+
 func TestCanRunBusyWaitSelfHeal(t *testing.T) {
 	t.Parallel()
 

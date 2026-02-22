@@ -1487,6 +1487,7 @@ func TestClassifyTelegramCodexFailure(t *testing.T) {
 		{name: "timeout", err: fmt.Errorf("codex exec timeout: context deadline exceeded"), want: "timeout"},
 		{name: "permission", err: fmt.Errorf("operation not permitted"), want: "permission"},
 		{name: "not installed", err: fmt.Errorf("codex command not found"), want: "not_installed"},
+		{name: "file not found", err: fmt.Errorf("Error: No such file or directory (os error 2)"), want: "file_not_found"},
 		{name: "invalid response", err: fmt.Errorf("parse codex refine json: invalid character"), want: "invalid_response"},
 		{name: "other", err: fmt.Errorf("exit status 1"), want: "exec_failure"},
 	}

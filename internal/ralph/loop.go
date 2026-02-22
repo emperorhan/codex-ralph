@@ -569,10 +569,24 @@ func runCodexAndValidate(ctx context.Context, paths Paths, profile Profile, inPr
 	if shouldValidate(profile, meta.Role) {
 		validateCmd := exec.CommandContext(ctx, "bash", "-lc", profile.ValidateCmd)
 		validateCmd.Dir = paths.ProjectDir
-		validateCmd.Stdout = logFile
-		validateCmd.Stderr = logFile
+		validateTail := newTailBuffer(64 * 1024)
+		validateCmd.Stdout = io.MultiWriter(logFile, validateTail)
+		validateCmd.Stderr = io.MultiWriter(logFile, validateTail)
 		if err := validateCmd.Run(); err != nil {
-			return fmt.Errorf("validate_exit_%d", exitCode(err))
+			if shouldFallbackGoDefaultValidation(profile, err, strings.ToLower(validateTail.String())) {
+				_, _ = fmt.Fprintln(logFile, "[ralph] validation fallback triggered: go-default legacy make targets unavailable; running `go test ./...`")
+				fallbackCmd := exec.CommandContext(ctx, "bash", "-lc", "go test ./...")
+				fallbackCmd.Dir = paths.ProjectDir
+				fallbackCmd.Stdout = logFile
+				fallbackCmd.Stderr = logFile
+				if fallbackErr := fallbackCmd.Run(); fallbackErr == nil {
+					_, _ = fmt.Fprintln(logFile, "[ralph] validation fallback succeeded")
+				} else {
+					return fmt.Errorf("validate_exit_%d", exitCode(fallbackErr))
+				}
+			} else {
+				return fmt.Errorf("validate_exit_%d", exitCode(err))
+			}
 		}
 	}
 	if requireHandoff {
@@ -737,6 +751,30 @@ func issueChecklistStats(path string) (checked, total int, err error) {
 func shouldValidate(profile Profile, role string) bool {
 	_, ok := profile.ValidateRoles[role]
 	return ok
+}
+
+func shouldFallbackGoDefaultValidation(profile Profile, err error, validateTailLower string) bool {
+	if strings.TrimSpace(profile.PluginName) != "go-default" {
+		return false
+	}
+	if exitCode(err) != 2 {
+		return false
+	}
+	if !isLegacyGoDefaultValidateCmd(profile.ValidateCmd) {
+		return false
+	}
+	if strings.Contains(validateTailLower, "no rule to make target") {
+		return true
+	}
+	if strings.Contains(validateTailLower, "no targets specified and no makefile found") {
+		return true
+	}
+	return false
+}
+
+func isLegacyGoDefaultValidateCmd(cmd string) bool {
+	normalized := strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(cmd))), " ")
+	return normalized == "make test && make test-sidecar && make lint"
 }
 
 func runCodexWithRetries(ctx context.Context, paths Paths, profile Profile, model, prompt string, logFile *os.File, lastMessagePath string) error {

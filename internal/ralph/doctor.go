@@ -168,6 +168,11 @@ func RunDoctor(paths Paths) (DoctorReport, error) {
 	} else {
 		report.add("validation", doctorStatusPass, fmt.Sprintf("validate_roles=%s", RoleSetCSV(profile.ValidateRoles)))
 	}
+	if strings.TrimSpace(profile.PluginName) == "go-default" && isLegacyGoDefaultValidateCmd(profile.ValidateCmd) {
+		if detail := legacyGoDefaultValidateTargetGap(paths.ProjectDir); strings.TrimSpace(detail) != "" {
+			report.add("validation:go-default", doctorStatusWarn, detail)
+		}
+	}
 
 	status, detail := evaluatePIDFile(paths.PIDFile)
 	report.add("daemon:primary", status, detail)
@@ -371,6 +376,46 @@ func removeStalePIDFile(pidFile string) (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+func legacyGoDefaultValidateTargetGap(projectDir string) string {
+	makefile := firstExistingFile(
+		filepath.Join(projectDir, "Makefile"),
+		filepath.Join(projectDir, "makefile"),
+		filepath.Join(projectDir, "GNUmakefile"),
+	)
+	if strings.TrimSpace(makefile) == "" {
+		return "go-default legacy validate_cmd expects make targets (test/test-sidecar/lint) but no Makefile found; consider setting RALPH_VALIDATE_CMD='go test ./...'"
+	}
+	data, err := os.ReadFile(makefile)
+	if err != nil {
+		return ""
+	}
+	text := strings.ToLower(string(data))
+	missing := []string{}
+	for _, target := range []string{"test:", "test-sidecar:", "lint:"} {
+		if !strings.Contains(text, target) {
+			missing = append(missing, strings.TrimSuffix(target, ":"))
+		}
+	}
+	if len(missing) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("go-default legacy validate_cmd may fail (missing make target: %s); consider setting RALPH_VALIDATE_CMD='go test ./...'", strings.Join(missing, ","))
+}
+
+func firstExistingFile(paths ...string) string {
+	for _, p := range paths {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		info, err := os.Stat(p)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		return p
+	}
+	return ""
 }
 
 func appendPluginRegistryChecks(report *DoctorReport, controlDir string) {

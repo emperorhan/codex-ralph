@@ -87,10 +87,14 @@ func telegramChatConversationInput(paths ralph.Paths, chatID int64, input string
 
 func formatTelegramCodexChatUnavailable(err error) string {
 	category, detail := classifyTelegramCodexFailure(err)
+	next := "check codex login/network/profile and retry"
+	if category == "file_not_found" {
+		next = "check project path/working dir, restart telegram daemon (`ralphctl telegram stop && ralphctl telegram run`), then retry"
+	}
 	lines := []string{
 		"codex chat unavailable",
 		"- reason: codex execution failed",
-		"- next: check codex login/network/profile and retry",
+		"- next: " + next,
 	}
 	if category != "" {
 		lines = append(lines, "- codex_error: "+category)

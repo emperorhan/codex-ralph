@@ -365,7 +365,10 @@ func runTelegramPRDCodexExec(
 	prompt string,
 	tmpPrefix string,
 ) (string, error) {
-	tmpDir, err := os.MkdirTemp("", tmpPrefix)
+	if err := ralph.EnsureLayout(paths); err != nil {
+		return "", err
+	}
+	tmpDir, err := telegramCodexTempDir(paths, tmpPrefix)
 	if err != nil {
 		return "", err
 	}
@@ -412,6 +415,18 @@ func runTelegramPRDCodexExec(
 		return "", fmt.Errorf("read codex output: %w", err)
 	}
 	return string(raw), nil
+}
+
+func telegramCodexTempDir(paths ralph.Paths, prefix string) (string, error) {
+	base := filepath.Join(paths.RalphDir, "tmp")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return "", fmt.Errorf("create telegram codex tmp base: %w", err)
+	}
+	tmpDir, err := os.MkdirTemp(base, prefix)
+	if err != nil {
+		return "", fmt.Errorf("create telegram codex tmp dir: %w", err)
+	}
+	return tmpDir, nil
 }
 
 func buildTelegramPRDRefinePrompt(session telegramPRDSession, conversationTail string) string {
