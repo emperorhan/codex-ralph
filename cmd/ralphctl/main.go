@@ -152,6 +152,9 @@ func run() error {
 		advanced := fs.Bool("advanced", false, "run interactive setup wizard")
 		modeRaw := fs.String("mode", "", "deprecated: use --advanced")
 		startAfter := fs.Bool("start", true, "start daemon after setup completes")
+		fleetRegister := fs.Bool("fleet-register", true, "register this project to fleet list (enabled by default)")
+		fleetID := fs.String("fleet-id", "", "register this project into fleet with the given id")
+		fleetPRD := fs.String("fleet-prd", "PRD.md", "fleet PRD path used for setup registration")
 		if err := fs.Parse(cmdArgs); err != nil {
 			return err
 		}
@@ -199,6 +202,22 @@ func run() error {
 		fmt.Println("- runtime profile reload: automatic (loop boundary)")
 		fmt.Println("- supervisor settings changes: daemon restart required")
 		fmt.Println("- local git versioning: initialized (auto-commit on done issues, temp/runtime excluded)")
+		if !*fleetRegister && strings.TrimSpace(*fleetID) != "" {
+			return fmt.Errorf("--fleet-id requires --fleet-register=true")
+		}
+		if *fleetRegister {
+			fleetResult, err := ensureFleetRegistrationOnSetup(*controlDir, paths, strings.TrimSpace(*fleetID), strings.TrimSpace(*fleetPRD))
+			if err != nil {
+				return err
+			}
+			fmt.Println("- fleet registration:")
+			fmt.Printf("  - status: %s\n", fleetResult.Status)
+			fmt.Printf("  - id: %s\n", fleetResult.Project.ID)
+			fmt.Printf("  - prd: %s\n", fleetResult.Project.PRDPath)
+			fmt.Printf("  - bootstrap_created: %d\n", fleetResult.BootstrapCreated)
+		} else {
+			fmt.Println("- fleet registration: skipped")
+		}
 		if *startAfter {
 			startResult, err := startProjectDaemon(paths, startOptions{
 				DoctorRepair: true,
