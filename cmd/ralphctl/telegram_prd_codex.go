@@ -375,20 +375,7 @@ func runTelegramPRDCodexExec(
 	defer os.RemoveAll(tmpDir)
 
 	outPath := filepath.Join(tmpDir, "assistant-last-message.txt")
-	args := []string{
-		"--ask-for-approval", profile.CodexApproval,
-		"exec",
-		"--sandbox", profile.CodexSandbox,
-	}
-	if strings.TrimSpace(model) != "" {
-		args = append(args, "--model", model)
-	}
-	args = append(args,
-		"--cd", paths.ProjectDir,
-		"--skip-git-repo-check",
-		"--output-last-message", outPath,
-		"-",
-	)
+	args := buildTelegramCodexExecArgs(profile, model, paths.ProjectDir, outPath)
 
 	cmd := exec.CommandContext(ctx, "codex", args...)
 	codexHome, ensureErr := ralph.EnsureCodexHome(paths, profile)
@@ -405,6 +392,11 @@ func runTelegramPRDCodexExec(
 			return "", fmt.Errorf("codex exec timeout: context deadline exceeded")
 		}
 		errText := compactSingleLine(strings.TrimSpace(stderr.String()), 220)
+		if isTelegramNoSuchFileError(errText) {
+			if fallbackRaw, fallbackErr := runTelegramPRDCodexExecStdoutFallback(ctx, paths, profile, model, prompt); fallbackErr == nil {
+				return fallbackRaw, nil
+			}
+		}
 		if errText != "" {
 			return "", fmt.Errorf("codex exec failed: %w: %s", err, errText)
 		}
@@ -412,9 +404,75 @@ func runTelegramPRDCodexExec(
 	}
 	raw, err := os.ReadFile(outPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			if fallbackRaw, fallbackErr := runTelegramPRDCodexExecStdoutFallback(ctx, paths, profile, model, prompt); fallbackErr == nil {
+				return fallbackRaw, nil
+			}
+		}
 		return "", fmt.Errorf("read codex output: %w", err)
 	}
 	return string(raw), nil
+}
+
+func buildTelegramCodexExecArgs(profile ralph.Profile, model, projectDir, outPath string) []string {
+	args := []string{
+		"--ask-for-approval", profile.CodexApproval,
+		"exec",
+		"--sandbox", profile.CodexSandbox,
+	}
+	if strings.TrimSpace(model) != "" {
+		args = append(args, "--model", model)
+	}
+	args = append(args, "--cd", projectDir, "--skip-git-repo-check")
+	if strings.TrimSpace(outPath) != "" {
+		args = append(args, "--output-last-message", outPath)
+	}
+	args = append(args, "-")
+	return args
+}
+
+func runTelegramPRDCodexExecStdoutFallback(
+	ctx context.Context,
+	paths ralph.Paths,
+	profile ralph.Profile,
+	model string,
+	prompt string,
+) (string, error) {
+	args := buildTelegramCodexExecArgs(profile, model, paths.ProjectDir, "")
+	cmd := exec.CommandContext(ctx, "codex", args...)
+	codexHome, ensureErr := ralph.EnsureCodexHome(paths, profile)
+	if ensureErr != nil {
+		return "", fmt.Errorf("prepare codex home (fallback): %w", ensureErr)
+	}
+	cmd.Env = ralph.EnvWithCodexHome(os.Environ(), codexHome)
+	cmd.Stdin = strings.NewReader(sanitizeTelegramUTF8String(prompt))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf("codex exec timeout (fallback): context deadline exceeded")
+		}
+		errText := compactSingleLine(strings.TrimSpace(stderr.String()), 220)
+		if errText != "" {
+			return "", fmt.Errorf("codex exec failed (fallback): %w: %s", err, errText)
+		}
+		return "", fmt.Errorf("codex exec failed (fallback): %w", err)
+	}
+	text := strings.TrimSpace(stdout.String())
+	if text == "" {
+		return "", fmt.Errorf("codex exec fallback returned empty stdout")
+	}
+	return text, nil
+}
+
+func isTelegramNoSuchFileError(detail string) bool {
+	lower := strings.ToLower(strings.TrimSpace(detail))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "no such file or directory") || strings.Contains(lower, "os error 2")
 }
 
 func telegramCodexTempDir(paths ralph.Paths, prefix string) (string, error) {

@@ -861,13 +861,14 @@ func telegramDoctorRepairCommand(controlDir string, paths ralph.Paths, rawArgs s
 		pass, warn, fail := countDoctorRepairActions(outcome.Actions)
 		fmt.Fprintf(
 			&b,
-			"- project=%s pass=%d warn=%d fail=%d recovered=%d retried=%d daemon=%s circuit_failures=%d\n",
+			"- project=%s pass=%d warn=%d fail=%d recovered=%d retried_codex=%d retried_gate=%d daemon=%s circuit_failures=%d\n",
 			p.ID,
 			pass,
 			warn,
 			fail,
 			outcome.RecoveredInProgress,
 			outcome.RetriedBlockedCodex,
+			outcome.RetriedBlockedGate,
 			compactSingleLine(outcome.DaemonState, 60),
 			outcome.CircuitFailures,
 		)
@@ -879,6 +880,7 @@ type telegramDoctorRepairOutcome struct {
 	Actions              []ralph.DoctorRepairAction
 	RecoveredInProgress  int
 	RetriedBlockedCodex  int
+	RetriedBlockedGate   int
 	CircuitReset         bool
 	DaemonState          string
 	DaemonChanged        string
@@ -911,6 +913,11 @@ func runTelegramDoctorRepairFlow(paths ralph.Paths, autoStart bool) (telegramDoc
 		return outcome, err
 	}
 	outcome.RetriedBlockedCodex = retried
+	retriedGate, err := ralph.RetryBlockedIssues(paths, "completion_gate_exit_signal_missing", 0)
+	if err != nil {
+		return outcome, err
+	}
+	outcome.RetriedBlockedGate = retriedGate
 
 	statusAfterRetry, err := ralph.GetStatus(paths)
 	if err != nil {
@@ -1282,6 +1289,7 @@ func formatDoctorRepairOutcome(outcome telegramDoctorRepairOutcome) string {
 	fmt.Fprintf(&b, "- summary: pass=%d warn=%d fail=%d\n", pass, warn, fail)
 	fmt.Fprintf(&b, "- recovered_in_progress: %d\n", outcome.RecoveredInProgress)
 	fmt.Fprintf(&b, "- retried_blocked_codex: %d\n", outcome.RetriedBlockedCodex)
+	fmt.Fprintf(&b, "- retried_blocked_completion_gate: %d\n", outcome.RetriedBlockedGate)
 	fmt.Fprintf(&b, "- circuit_reset: %t\n", outcome.CircuitReset)
 	fmt.Fprintf(&b, "- daemon: %s\n", valueOrDash(outcome.DaemonState))
 	if strings.TrimSpace(outcome.DaemonChanged) != "" {

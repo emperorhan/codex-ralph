@@ -178,6 +178,39 @@ func TestShouldFallbackGoDefaultValidation(t *testing.T) {
 	}
 }
 
+func TestShouldAutoRequeueCompletionGateFailure(t *testing.T) {
+	t.Parallel()
+
+	issuePath := filepath.Join(t.TempDir(), "I-20260222T000000Z-0001.md")
+	content := "" +
+		"id: I-20260222T000000Z-0001\n" +
+		"role: qa\n" +
+		"status: in-progress\n" +
+		"title: test\n\n" +
+		"## Ralph Result\n" +
+		"- status: blocked\n" +
+		"- reason: completion_gate_exit_signal_missing\n"
+	if err := os.WriteFile(issuePath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write issue file: %v", err)
+	}
+
+	ok, attempt, maxAttempts := shouldAutoRequeueCompletionGateFailure(
+		errors.New("completion_gate_exit_signal_missing"),
+		issuePath,
+	)
+	if !ok {
+		t.Fatalf("expected auto requeue to be enabled")
+	}
+	if attempt != 2 || maxAttempts != completionGateAutoRequeueMax {
+		t.Fatalf("unexpected attempt counters: attempt=%d max=%d", attempt, maxAttempts)
+	}
+
+	ok, _, _ = shouldAutoRequeueCompletionGateFailure(errors.New("validate_exit_2"), issuePath)
+	if ok {
+		t.Fatalf("non completion-gate error should not auto requeue")
+	}
+}
+
 func TestCanRunBusyWaitSelfHeal(t *testing.T) {
 	t.Parallel()
 

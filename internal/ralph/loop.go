@@ -48,6 +48,8 @@ type codexExecutionError struct {
 	Retryable bool
 }
 
+const completionGateAutoRequeueMax = 2
+
 func (e *codexExecutionError) Error() string {
 	reason := strings.TrimSpace(e.Reason)
 	detail := strings.TrimSpace(e.Detail)
@@ -455,6 +457,26 @@ func processIssue(ctx context.Context, paths Paths, profile Profile, issuePath s
 	logPath := filepath.Join(paths.LogsDir, fmt.Sprintf("%s-%s.log", meta.ID, time.Now().UTC().Format("20060102T150405Z")))
 	handoffPath := HandoffFilePath(paths, meta)
 	if err := runCodexAndValidate(ctx, paths, profile, inProgressPath, meta, logPath, handoffPath); err != nil {
+		if requeue, attempt, maxAttempts := shouldAutoRequeueCompletionGateFailure(err, inProgressPath); requeue {
+			res.Outcome = "requeued"
+			res.FailureReason = err.Error()
+			_ = SetIssueStatus(inProgressPath, "ready")
+			reason := fmt.Sprintf("auto_requeue_completion_gate_exit_signal attempt=%d/%d; root=%s", attempt, maxAttempts, err.Error())
+			_ = AppendIssueResult(inProgressPath, "ready", reason, logPath)
+			readyPath := filepath.Join(paths.IssuesDir, meta.ID+".md")
+			if _, statErr := os.Stat(readyPath); statErr == nil {
+				readyPath = filepath.Join(paths.IssuesDir, fmt.Sprintf("requeued-%s-%s.md", time.Now().UTC().Format("20060102T150405Z"), meta.ID))
+			}
+			if renameErr := os.Rename(inProgressPath, readyPath); renameErr != nil {
+				return res, fmt.Errorf("auto requeue failed (%v), root cause: %w", renameErr, err)
+			}
+			if progressErr := AppendProgressEntry(paths, meta, "ready", reason, logPath); progressErr != nil {
+				fmt.Fprintf(stdout, "[ralph-loop] warning: progress journal append failed: %v\n", progressErr)
+			}
+			fmt.Fprintf(stdout, "[ralph-loop] auto-requeued %s after completion gate miss (%d/%d)\n", meta.ID, attempt, maxAttempts)
+			return res, nil
+		}
+
 		res.Outcome = "blocked"
 		res.FailureReason = err.Error()
 		var codexErr *codexExecutionError
@@ -746,6 +768,45 @@ func issueChecklistStats(path string) (checked, total int, err error) {
 		}
 	}
 	return checked, total, nil
+}
+
+func shouldAutoRequeueCompletionGateFailure(err error, issuePath string) (bool, int, int) {
+	if err == nil {
+		return false, 0, completionGateAutoRequeueMax
+	}
+	reason := strings.TrimSpace(err.Error())
+	if !strings.HasPrefix(reason, "completion_gate_exit_signal_") {
+		return false, 0, completionGateAutoRequeueMax
+	}
+	prevCount, readErr := countIssueReasonContains(issuePath, "completion_gate_exit_signal_")
+	if readErr != nil {
+		return false, 0, completionGateAutoRequeueMax
+	}
+	attempt := prevCount + 1
+	return attempt <= completionGateAutoRequeueMax, attempt, completionGateAutoRequeueMax
+}
+
+func countIssueReasonContains(path, needle string) (int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	target := strings.ToLower(strings.TrimSpace(needle))
+	if target == "" {
+		return 0, nil
+	}
+	count := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "- reason:") {
+			continue
+		}
+		value := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(trimmed, "- reason:")))
+		if strings.Contains(value, target) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func shouldValidate(profile Profile, role string) bool {
