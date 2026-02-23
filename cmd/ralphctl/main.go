@@ -594,6 +594,7 @@ type reloadProjectResult struct {
 	RoleWorkers        []string
 	TelegramWasRunning bool
 	TelegramPID        int
+	TelegramOrphanPIDs []int
 	TelegramRestarted  bool
 }
 
@@ -738,7 +739,10 @@ func projectLooksManaged(paths ralph.Paths) bool {
 	if _, err := os.Stat(paths.RalphDir); err == nil {
 		return true
 	}
-	if _, running, _ := telegramPIDState(paths.PIDFile); running {
+	if _, running, _ := telegramPIDState(paths.TelegramPIDFile()); running {
+		return true
+	}
+	if orphans, err := findTelegramOrphanPIDs(paths, 0); err == nil && len(orphans) > 0 {
 		return true
 	}
 	_, rolePIDs := ralph.RunningRoleDaemons(paths)
@@ -754,7 +758,15 @@ func reloadSingleProject(target reloadTarget, executable string, opts reloadOpti
 	primaryPID, primaryRunning, _ := telegramPIDState(paths.PIDFile)
 	roleWorkers, _ := ralph.RunningRoleDaemons(paths)
 	sort.Strings(roleWorkers)
-	telegramPID, telegramRunning, _ := telegramPIDState(paths.TelegramPIDFile())
+	telegramPID, trackedTelegramRunning, _ := telegramPIDState(paths.TelegramPIDFile())
+	telegramOrphanPIDs, orphanDetectErr := findTelegramOrphanPIDs(paths, telegramPID)
+	if orphanDetectErr != nil {
+		telegramOrphanPIDs = nil
+	}
+	telegramRunning := trackedTelegramRunning || len(telegramOrphanPIDs) > 0
+	if telegramPID <= 0 && len(telegramOrphanPIDs) > 0 {
+		telegramPID = telegramOrphanPIDs[0]
+	}
 
 	res := reloadProjectResult{
 		ID:                 target.ID,
@@ -765,6 +777,7 @@ func reloadSingleProject(target reloadTarget, executable string, opts reloadOpti
 		RoleWorkers:        append([]string(nil), roleWorkers...),
 		TelegramWasRunning: telegramRunning,
 		TelegramPID:        telegramPID,
+		TelegramOrphanPIDs: append([]int(nil), telegramOrphanPIDs...),
 	}
 
 	if opts.RestartRunning {
@@ -779,7 +792,12 @@ func reloadSingleProject(target reloadTarget, executable string, opts reloadOpti
 			}
 		}
 		if opts.ReloadTelegram && telegramRunning {
-			if _, err := stopTelegramDaemon(paths); err != nil {
+			if trackedTelegramRunning {
+				if _, err := stopTelegramDaemon(paths); err != nil {
+					return res, err
+				}
+			}
+			if err := stopTelegramDaemonByPIDs(telegramOrphanPIDs); err != nil {
 				return res, err
 			}
 		}
@@ -837,6 +855,13 @@ func printReloadSummary(out io.Writer, executable, controlDir string, results []
 			fmt.Fprintf(out, "- daemon_roles: %s\n", strings.Join(res.RoleWorkers, ","))
 		}
 		fmt.Fprintf(out, "- telegram: %s\n", reloadRunStateLabel(res.TelegramWasRunning, res.TelegramRestarted, res.TelegramPID))
+		if len(res.TelegramOrphanPIDs) > 0 {
+			parts := make([]string, 0, len(res.TelegramOrphanPIDs))
+			for _, pid := range res.TelegramOrphanPIDs {
+				parts = append(parts, strconv.Itoa(pid))
+			}
+			fmt.Fprintf(out, "- telegram_orphans: %s\n", strings.Join(parts, ","))
+		}
 	}
 }
 

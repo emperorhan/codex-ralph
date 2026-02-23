@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -18,6 +19,13 @@ import (
 
 	"codex-ralph/internal/ralph"
 )
+
+type telegramProcessEntry struct {
+	PID     int
+	Command string
+}
+
+var telegramProcessTableReader = defaultTelegramProcessTableReader
 
 func runTelegramCommand(controlDir string, paths ralph.Paths, args []string) error {
 	usage := func() {
@@ -1854,6 +1862,200 @@ func isTelegramPIDRunning(pid int) bool {
 		return false
 	}
 	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+func defaultTelegramProcessTableReader() ([]telegramProcessEntry, error) {
+	var lastErr error
+	candidates := [][]string{
+		{"-eo", "pid=,args="},
+		{"ax", "-o", "pid=", "-o", "command="},
+	}
+	for _, args := range candidates {
+		cmd := exec.Command("ps", args...)
+		raw, err := cmd.Output()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return parseTelegramProcessTable(raw), nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return []telegramProcessEntry{}, nil
+}
+
+func parseTelegramProcessTable(raw []byte) []telegramProcessEntry {
+	lines := strings.Split(string(raw), "\n")
+	out := make([]telegramProcessEntry, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(fields[0]))
+		if err != nil || pid <= 0 {
+			continue
+		}
+		command := strings.TrimSpace(line[len(fields[0]):])
+		if command == "" {
+			continue
+		}
+		out = append(out, telegramProcessEntry{
+			PID:     pid,
+			Command: command,
+		})
+	}
+	return out
+}
+
+func normalizeTelegramCLIPath(raw string) string {
+	v := strings.Trim(strings.TrimSpace(raw), "\"'")
+	if v == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(v); err == nil {
+		v = abs
+	}
+	return filepath.Clean(v)
+}
+
+func isTelegramDaemonCommandForProject(command string, paths ralph.Paths) bool {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return false
+	}
+	fields := strings.Fields(command)
+	if len(fields) < 2 {
+		return false
+	}
+
+	hasTelegramRun := false
+	for i := 0; i+1 < len(fields); i++ {
+		if fields[i] == "telegram" && fields[i+1] == "run" {
+			hasTelegramRun = true
+			break
+		}
+	}
+	if !hasTelegramRun {
+		return false
+	}
+
+	targetProject := normalizeTelegramCLIPath(paths.ProjectDir)
+	if targetProject == "" {
+		return false
+	}
+	for i := 0; i < len(fields); i++ {
+		token := strings.TrimSpace(fields[i])
+		switch {
+		case token == "--project-dir" && i+1 < len(fields):
+			if normalizeTelegramCLIPath(fields[i+1]) == targetProject {
+				return true
+			}
+			i++
+		case strings.HasPrefix(token, "--project-dir="):
+			value := strings.TrimSpace(strings.TrimPrefix(token, "--project-dir="))
+			if normalizeTelegramCLIPath(value) == targetProject {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func findTelegramDaemonPIDs(paths ralph.Paths) ([]int, error) {
+	entries, err := telegramProcessTableReader()
+	if err != nil {
+		return nil, err
+	}
+	seen := map[int]struct{}{}
+	out := []int{}
+	for _, entry := range entries {
+		if entry.PID <= 0 {
+			continue
+		}
+		if !isTelegramDaemonCommandForProject(entry.Command, paths) {
+			continue
+		}
+		if !isTelegramPIDRunning(entry.PID) {
+			continue
+		}
+		if _, exists := seen[entry.PID]; exists {
+			continue
+		}
+		seen[entry.PID] = struct{}{}
+		out = append(out, entry.PID)
+	}
+	sort.Ints(out)
+	return out, nil
+}
+
+func findTelegramOrphanPIDs(paths ralph.Paths, trackedPID int) ([]int, error) {
+	pids, err := findTelegramDaemonPIDs(paths)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]int, 0, len(pids))
+	for _, pid := range pids {
+		if trackedPID > 0 && pid == trackedPID {
+			continue
+		}
+		out = append(out, pid)
+	}
+	return out, nil
+}
+
+func stopTelegramDaemonByPIDs(pids []int) error {
+	if len(pids) == 0 {
+		return nil
+	}
+	seen := map[int]struct{}{}
+	uniq := make([]int, 0, len(pids))
+	for _, pid := range pids {
+		if pid <= 0 {
+			continue
+		}
+		if _, exists := seen[pid]; exists {
+			continue
+		}
+		seen[pid] = struct{}{}
+		uniq = append(uniq, pid)
+	}
+	sort.Ints(uniq)
+	for _, pid := range uniq {
+		if err := stopTelegramDaemonByPID(pid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func stopTelegramDaemonByPID(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	if !isTelegramPIDRunning(pid) {
+		return nil
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("find telegram process %d: %w", pid, err)
+	}
+	_ = proc.Signal(syscall.SIGTERM)
+	for i := 0; i < 30; i++ {
+		if !isTelegramPIDRunning(pid) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if isTelegramPIDRunning(pid) {
+		_ = proc.Signal(syscall.SIGKILL)
+	}
+	return nil
 }
 
 func ensureTelegramForegroundArg(args []string) []string {

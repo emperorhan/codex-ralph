@@ -753,6 +753,93 @@ func TestTelegramPIDState(t *testing.T) {
 	}
 }
 
+func TestIsTelegramDaemonCommandForProject(t *testing.T) {
+	t.Parallel()
+
+	controlDir := filepath.Join(t.TempDir(), "control")
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("mkdir control dir: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	paths, err := ralph.NewPaths(controlDir, projectDir)
+	if err != nil {
+		t.Fatalf("new paths failed: %v", err)
+	}
+	cmd := fmt.Sprintf(
+		"/usr/local/bin/ralphctl --control-dir %s --project-dir %s telegram run --foreground",
+		paths.ControlDir,
+		paths.ProjectDir,
+	)
+	if !isTelegramDaemonCommandForProject(cmd, paths) {
+		t.Fatalf("expected command to match telegram daemon for project")
+	}
+
+	otherProject := filepath.Join(projectDir, "other")
+	otherCmd := fmt.Sprintf(
+		"/usr/local/bin/ralphctl --project-dir %s telegram run --foreground",
+		otherProject,
+	)
+	if isTelegramDaemonCommandForProject(otherCmd, paths) {
+		t.Fatalf("unexpected match for different project")
+	}
+}
+
+func TestFindTelegramOrphanPIDs(t *testing.T) {
+	controlDir := filepath.Join(t.TempDir(), "control")
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("mkdir control dir: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	paths, err := ralph.NewPaths(controlDir, projectDir)
+	if err != nil {
+		t.Fatalf("new paths failed: %v", err)
+	}
+
+	oldReader := telegramProcessTableReader
+	currentPID := os.Getpid()
+	telegramProcessTableReader = func() ([]telegramProcessEntry, error) {
+		return []telegramProcessEntry{
+			{
+				PID:     currentPID,
+				Command: fmt.Sprintf("/bin/ralphctl --control-dir %s --project-dir %s telegram run --foreground", paths.ControlDir, paths.ProjectDir),
+			},
+			{
+				PID:     1002,
+				Command: fmt.Sprintf("/bin/ralphctl --project-dir %s telegram run --foreground", paths.ProjectDir),
+			},
+			{
+				PID:     1003,
+				Command: "/bin/ralphctl --project-dir /tmp/other telegram run --foreground",
+			},
+		}, nil
+	}
+	t.Cleanup(func() {
+		telegramProcessTableReader = oldReader
+	})
+
+	pids, err := findTelegramOrphanPIDs(paths, 0)
+	if err != nil {
+		t.Fatalf("findTelegramOrphanPIDs failed: %v", err)
+	}
+	if len(pids) != 1 || pids[0] != currentPID {
+		t.Fatalf("expected orphan pid=%d, got=%v", currentPID, pids)
+	}
+
+	trackedOnly, err := findTelegramOrphanPIDs(paths, currentPID)
+	if err != nil {
+		t.Fatalf("findTelegramOrphanPIDs with tracked pid failed: %v", err)
+	}
+	if len(trackedOnly) != 0 {
+		t.Fatalf("expected no orphan after filtering tracked pid, got=%v", trackedOnly)
+	}
+}
+
 func TestParseTelegramPRDStoryRole(t *testing.T) {
 	t.Parallel()
 

@@ -8,10 +8,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 const defaultIssuePriority = 1000
+
+var issueIDCounter uint64
 
 type IssueMeta struct {
 	ID       string
@@ -46,45 +49,6 @@ func CreateIssueWithOptions(paths Paths, role, title string, opts IssueCreateOpt
 		return "", "", fmt.Errorf("title is required")
 	}
 
-	now := time.Now().UTC()
-	id := fmt.Sprintf("I-%s-%04d", now.Format("20060102T150405Z"), now.Nanosecond()%10000)
-	issuePath := filepath.Join(paths.IssuesDir, id+".md")
-	headers := []string{
-		fmt.Sprintf("id: %s", id),
-		fmt.Sprintf("role: %s", role),
-		"status: ready",
-		fmt.Sprintf("title: %s", title),
-		fmt.Sprintf("created_at_utc: %s", now.Format(time.RFC3339)),
-	}
-	if opts.Priority > 0 {
-		headers = append(headers, fmt.Sprintf("priority: %d", opts.Priority))
-	}
-	if sid := strings.TrimSpace(opts.StoryID); sid != "" {
-		headers = append(headers, fmt.Sprintf("story_id: %s", sid))
-	}
-	if len(opts.ExtraMeta) > 0 {
-		keys := make([]string, 0, len(opts.ExtraMeta))
-		for k := range opts.ExtraMeta {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			key := strings.TrimSpace(k)
-			if key == "" {
-				continue
-			}
-			switch key {
-			case "id", "role", "status", "title", "created_at_utc", "priority", "story_id":
-				continue
-			}
-			val := strings.TrimSpace(opts.ExtraMeta[k])
-			if val == "" {
-				continue
-			}
-			headers = append(headers, fmt.Sprintf("%s: %s", key, val))
-		}
-	}
-
 	objective := strings.TrimSpace(opts.Objective)
 	if objective == "" {
 		objective = title
@@ -97,14 +61,76 @@ func CreateIssueWithOptions(paths Paths, role, title string, opts IssueCreateOpt
 		}
 	}
 
-	bodyLines := []string{"## Objective", "- " + objective, "", "## Acceptance Criteria"}
-	bodyLines = append(bodyLines, criteria...)
-	content := strings.Join(headers, "\n") + "\n\n" + strings.Join(bodyLines, "\n") + "\n"
-	if err := os.WriteFile(issuePath, []byte(content), 0o644); err != nil {
-		return "", "", fmt.Errorf("write issue file: %w", err)
+	for attempt := 0; attempt < 128; attempt++ {
+		now := time.Now().UTC()
+		id := nextIssueID(now)
+		issuePath := filepath.Join(paths.IssuesDir, id+".md")
+
+		headers := []string{
+			fmt.Sprintf("id: %s", id),
+			fmt.Sprintf("role: %s", role),
+			"status: ready",
+			fmt.Sprintf("title: %s", title),
+			fmt.Sprintf("created_at_utc: %s", now.Format(time.RFC3339)),
+		}
+		if opts.Priority > 0 {
+			headers = append(headers, fmt.Sprintf("priority: %d", opts.Priority))
+		}
+		if sid := strings.TrimSpace(opts.StoryID); sid != "" {
+			headers = append(headers, fmt.Sprintf("story_id: %s", sid))
+		}
+		if len(opts.ExtraMeta) > 0 {
+			keys := make([]string, 0, len(opts.ExtraMeta))
+			for k := range opts.ExtraMeta {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				key := strings.TrimSpace(k)
+				if key == "" {
+					continue
+				}
+				switch key {
+				case "id", "role", "status", "title", "created_at_utc", "priority", "story_id":
+					continue
+				}
+				val := strings.TrimSpace(opts.ExtraMeta[k])
+				if val == "" {
+					continue
+				}
+				headers = append(headers, fmt.Sprintf("%s: %s", key, val))
+			}
+		}
+
+		bodyLines := []string{"## Objective", "- " + objective, "", "## Acceptance Criteria"}
+		bodyLines = append(bodyLines, criteria...)
+		content := strings.Join(headers, "\n") + "\n\n" + strings.Join(bodyLines, "\n") + "\n"
+
+		f, err := os.OpenFile(issuePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err != nil {
+			if os.IsExist(err) {
+				continue
+			}
+			return "", "", fmt.Errorf("open issue file: %w", err)
+		}
+		if _, err := f.WriteString(content); err != nil {
+			_ = f.Close()
+			_ = os.Remove(issuePath)
+			return "", "", fmt.Errorf("write issue file: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			_ = os.Remove(issuePath)
+			return "", "", fmt.Errorf("close issue file: %w", err)
+		}
+		return issuePath, id, nil
 	}
 
-	return issuePath, id, nil
+	return "", "", fmt.Errorf("failed to allocate unique issue id after retries")
+}
+
+func nextIssueID(now time.Time) string {
+	seq := atomic.AddUint64(&issueIDCounter, 1) % 1000000
+	return fmt.Sprintf("I-%s-%06d", now.Format("20060102T150405Z"), seq)
 }
 
 func normalizeAcceptanceCriteria(items []string) []string {
