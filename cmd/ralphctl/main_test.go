@@ -150,3 +150,42 @@ func TestResolveReloadTargetsCurrentOnlyRequiresManagedProject(t *testing.T) {
 		t.Fatalf("expected error for unmanaged current project")
 	}
 }
+
+func TestResolveRunEngineAutoFromCutover(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	controlDir := filepath.Join(root, "control")
+	projectDir := filepath.Join(root, "project")
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
+		t.Fatalf("mkdir control: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	got, state, err := resolveRunEngine(projectDir, "auto")
+	if err != nil {
+		t.Fatalf("resolveRunEngine(auto) failed: %v", err)
+	}
+	if got != "v1" {
+		t.Fatalf("engine mismatch: got=%s want=v1", got)
+	}
+	if state.Mode != "v1" {
+		t.Fatalf("cutover mode mismatch: got=%s want=v1", state.Mode)
+	}
+
+	if _, err := ralph.ControlPlaneSetCutoverMode(projectDir, true, true, "test"); err != nil {
+		t.Fatalf("set cutover mode failed: %v", err)
+	}
+	got, state, err = resolveRunEngine(projectDir, "auto")
+	if err != nil {
+		t.Fatalf("resolveRunEngine(auto) after v2 failed: %v", err)
+	}
+	if got != "v2" {
+		t.Fatalf("engine mismatch after v2: got=%s want=v2", got)
+	}
+	if state.Mode != "v2" {
+		t.Fatalf("cutover mode mismatch after v2: got=%s want=v2", state.Mode)
+	}
+}

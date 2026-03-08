@@ -42,7 +42,7 @@ func run() error {
 
 	global.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: ralphctl [--control-dir DIR] [--project-dir DIR] <command> [args]")
-		fmt.Fprintln(os.Stderr, "Commands: list-plugins, install, apply-plugin, registry, setup, reload, init, on, off, new, intake, import-prd, recover, retry-blocked, doctor, run, supervise, start, stop, restart, status, tail, service, fleet, telegram")
+		fmt.Fprintln(os.Stderr, "Commands: list-plugins, install, apply-plugin, registry, setup, reload, init, on, off, new, intake, import-prd, recover, retry-blocked, doctor, run, supervise, start, stop, restart, status, tail, service, fleet, telegram, cp")
 	}
 
 	if err := global.Parse(os.Args[1:]); err != nil {
@@ -86,6 +86,9 @@ func run() error {
 			return err
 		}
 		return runTelegramCommand(*controlDir, paths, cmdArgs)
+	}
+	if cmd == "cp" {
+		return runControlPlaneCommand(*controlDir, *projectDir, cmdArgs)
 	}
 
 	paths, err := ralph.NewPaths(*controlDir, *projectDir)
@@ -397,6 +400,8 @@ func run() error {
 		fs := flag.NewFlagSet("run", flag.ContinueOnError)
 		maxLoops := fs.Int("max-loops", 1, "0 means infinite")
 		rolesRaw := fs.String("roles", "", "comma-separated role scope (manager,planner,developer,qa)")
+		engine := fs.String("engine", "auto", "execution engine: auto|v1|v2")
+		executeWithCodex := fs.Bool("execute-with-codex", false, "when engine=v2, run codex execution step before verify")
 		if err := fs.Parse(cmdArgs); err != nil {
 			return err
 		}
@@ -410,11 +415,28 @@ func run() error {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+		resolvedEngine, cutoverState, err := resolveRunEngine(paths.ProjectDir, *engine)
+		if err != nil {
+			return err
+		}
+		if resolvedEngine == "v2" {
+			if len(allowedRoles) > 0 {
+				return fmt.Errorf("roles are not supported with engine=v2 yet; use --engine v1 for role-scoped workers")
+			}
+			fmt.Fprintf(os.Stdout, "[ralph-run] engine=v2 (cutover_mode=%s canary=%t)\n", cutoverState.Mode, cutoverState.Canary)
+			return runControlPlaneLoop(ctx, paths, profile, *maxLoops, *controlDir, *executeWithCodex, os.Stdout)
+		}
+		if *executeWithCodex {
+			fmt.Fprintln(os.Stdout, "[ralph-run] note: --execute-with-codex is ignored when engine=v1")
+		}
+		fmt.Fprintf(os.Stdout, "[ralph-run] engine=v1 (cutover_mode=%s canary=%t)\n", cutoverState.Mode, cutoverState.Canary)
 		return ralph.RunLoop(ctx, paths, profile, ralph.RunOptions{MaxLoops: *maxLoops, Stdout: os.Stdout, AllowedRoles: allowedRoles})
 
 	case "supervise":
 		fs := flag.NewFlagSet("supervise", flag.ContinueOnError)
 		rolesRaw := fs.String("roles", "", "comma-separated role scope (manager,planner,developer,qa)")
+		engine := fs.String("engine", "auto", "execution engine: auto|v1|v2")
+		executeWithCodex := fs.Bool("execute-with-codex", false, "when engine=v2, run codex execution step before verify")
 		if err := fs.Parse(cmdArgs); err != nil {
 			return err
 		}
@@ -428,7 +450,7 @@ func run() error {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		return ralph.RunSupervisor(ctx, paths, profile, allowedRoles, os.Stdout)
+		return ralph.RunSupervisor(ctx, paths, profile, allowedRoles, *engine, *executeWithCodex, os.Stdout)
 
 	case "start":
 		fs := flag.NewFlagSet("start", flag.ContinueOnError)
@@ -478,6 +500,34 @@ func run() error {
 			return err
 		}
 		st.Print(os.Stdout)
+		cutoverState, cutoverErr := ralph.ControlPlaneGetCutoverState(paths.ProjectDir)
+		if cutoverErr == nil {
+			fmt.Fprintln(os.Stdout)
+			fmt.Fprintln(os.Stdout, "[Control Plane]")
+			fmt.Fprintf(os.Stdout, "Mode:   %s\n", cutoverState.Mode)
+			fmt.Fprintf(os.Stdout, "Canary: %t\n", cutoverState.Canary)
+			if cutoverState.UpdatedAtUTC != "" {
+				fmt.Fprintf(os.Stdout, "Updated: %s\n", cutoverState.UpdatedAtUTC)
+			}
+			if cutoverState.Mode == "v2" {
+				cpStatus, cpErr := ralph.ControlPlaneStatusReport(paths.ProjectDir)
+				if cpErr == nil {
+					fmt.Fprintf(os.Stdout, "Tasks:  total=%d ready=%d running=%d verifying=%d done=%d blocked=%d\n",
+						cpStatus.TasksTotal,
+						cpStatus.StateCounts[ralph.ControlPlaneTaskStateReady],
+						cpStatus.StateCounts[ralph.ControlPlaneTaskStateRunning],
+						cpStatus.StateCounts[ralph.ControlPlaneTaskStateVerifying],
+						cpStatus.StateCounts[ralph.ControlPlaneTaskStateDone],
+						cpStatus.StateCounts[ralph.ControlPlaneTaskStateBlocked],
+					)
+					fmt.Fprintf(os.Stdout, "KPI:    blocked_rate=%.4f recovery_success_rate=%.4f mttr_seconds=%.2f\n",
+						cpStatus.Metrics.BlockedRate,
+						cpStatus.Metrics.RecoverySuccessRate,
+						cpStatus.Metrics.MeanTimeToRecovery,
+					)
+				}
+			}
+		}
 		return nil
 
 	case "tail":
@@ -995,6 +1045,23 @@ func renderFleetDashboard(controlDir, projectID string, all bool, out io.Writer)
 			st.Done,
 			st.Blocked,
 		)
+		if cpState, cpErr := ralph.ControlPlaneGetCutoverState(paths.ProjectDir); cpErr == nil {
+			fmt.Fprintf(out, "  control_plane_mode=%s | canary=%t\n", cpState.Mode, cpState.Canary)
+			if cpState.Mode == "v2" {
+				if cpStatus, cpStatusErr := ralph.ControlPlaneStatusReport(paths.ProjectDir); cpStatusErr == nil {
+					fmt.Fprintf(
+						out,
+						"  cp_tasks total=%d ready=%d running=%d verifying=%d done=%d blocked=%d\n",
+						cpStatus.TasksTotal,
+						cpStatus.StateCounts[ralph.ControlPlaneTaskStateReady],
+						cpStatus.StateCounts[ralph.ControlPlaneTaskStateRunning],
+						cpStatus.StateCounts[ralph.ControlPlaneTaskStateVerifying],
+						cpStatus.StateCounts[ralph.ControlPlaneTaskStateDone],
+						cpStatus.StateCounts[ralph.ControlPlaneTaskStateBlocked],
+					)
+				}
+			}
+		}
 		if len(roles) > 0 {
 			roleLine := []string{}
 			for _, role := range ralph.RequiredAgentRoles {
@@ -1037,6 +1104,82 @@ func sleepOrInterrupt(ctx context.Context, d time.Duration) error {
 		return ctx.Err()
 	case <-timer.C:
 		return nil
+	}
+}
+
+func resolveRunEngine(projectDir, requested string) (string, ralph.ControlPlaneCutoverState, error) {
+	normalized := strings.ToLower(strings.TrimSpace(requested))
+	switch normalized {
+	case "", "auto":
+		state, err := ralph.ControlPlaneGetCutoverState(projectDir)
+		if err != nil {
+			return "", ralph.ControlPlaneCutoverState{}, err
+		}
+		if strings.TrimSpace(state.Mode) == "v2" {
+			return "v2", state, nil
+		}
+		return "v1", state, nil
+	case "v1":
+		state, _ := ralph.ControlPlaneGetCutoverState(projectDir)
+		if strings.TrimSpace(state.Mode) == "" {
+			state.Mode = "v1"
+		}
+		return "v1", state, nil
+	case "v2":
+		state, _ := ralph.ControlPlaneGetCutoverState(projectDir)
+		if strings.TrimSpace(state.Mode) == "" {
+			state.Mode = "v2"
+		}
+		return "v2", state, nil
+	default:
+		return "", ralph.ControlPlaneCutoverState{}, fmt.Errorf("invalid --engine value: %s (expected auto|v1|v2)", requested)
+	}
+}
+
+func runControlPlaneLoop(ctx context.Context, paths ralph.Paths, profile ralph.Profile, maxLoops int, controlDir string, executeWithCodex bool, out io.Writer) error {
+	if out == nil {
+		out = os.Stdout
+	}
+	if maxLoops < 0 {
+		maxLoops = 0
+	}
+	processed := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			fmt.Fprintln(out, "[ralph-cp-loop] interrupted; stopping")
+			return nil
+		}
+		enabled, err := ralph.IsEnabled(paths)
+		if err != nil {
+			return err
+		}
+		if !enabled {
+			fmt.Fprintln(out, "[ralph-cp-loop] disabled; stopping")
+			return nil
+		}
+		res, err := ralph.ControlPlaneRun(paths.ProjectDir, ralph.ControlPlaneRunOptions{
+			MaxWorkers:       1,
+			MaxTasks:         1,
+			LeaseSec:         120,
+			ExecuteWithCodex: executeWithCodex,
+			ControlDir:       controlDir,
+		})
+		if err != nil {
+			return err
+		}
+		if res.Processed > 0 {
+			processed += res.Processed
+			fmt.Fprintf(out, "[ralph-cp-loop] processed=%d done=%d blocked=%d recovered=%d remaining_ready=%d\n", res.Processed, res.Done, res.Blocked, res.Recovered, res.RemainingReady)
+			if maxLoops > 0 && processed >= maxLoops {
+				fmt.Fprintf(out, "[ralph-cp-loop] max loops reached (%d)\n", maxLoops)
+				return nil
+			}
+			continue
+		}
+		fmt.Fprintf(out, "[ralph-cp-loop] no ready tasks; sleeping %ds\n", profile.IdleSleepSec)
+		if err := sleepOrInterrupt(ctx, time.Duration(profile.IdleSleepSec)*time.Second); err != nil {
+			return nil
+		}
 	}
 }
 

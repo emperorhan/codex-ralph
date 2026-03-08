@@ -132,6 +132,132 @@ blocked 이슈 재시도:
 ./ralph retry-blocked --reason codex_permission_denied --limit 1
 ```
 
+## Control Plane v2 (Intent -> Graph -> Execution)
+
+v2는 `cp` 네임스페이스로 실행됩니다.
+
+### 1) 초기화 및 Intent 입력
+
+```bash
+ralphctl --project-dir "$PWD" cp init
+ralphctl --project-dir "$PWD" cp import-intent --file intent.json
+ralphctl --project-dir "$PWD" cp plan --intent-id <intent-id>
+```
+
+### 2) 실행/검증
+
+```bash
+# 기본 실행 (verify 중심)
+ralphctl --project-dir "$PWD" cp run --max-workers 1
+
+# Codex 실행 + verify
+ralphctl --project-dir "$PWD" cp run --max-workers 1 --execute-with-codex
+
+# blocked 복구 (policy 존중: retry budget/backoff/circuit)
+ralphctl --project-dir "$PWD" cp recover
+
+# 즉시 강제 복구 (cooldown/circuit 우회)
+ralphctl --project-dir "$PWD" cp recover --force
+
+ralphctl --project-dir "$PWD" cp status --json
+ralphctl --project-dir "$PWD" cp metrics --json
+ralphctl --project-dir "$PWD" cp metrics --with-baseline --json
+ralphctl --project-dir "$PWD" cp doctor --repair --repair-recover-limit 10 --strict
+# cooldown/circuit 우회가 필요할 때
+ralphctl --project-dir "$PWD" cp doctor --repair --repair-force-recover --strict
+# blocked circuit/재시도 예산을 수동 초기화할 때
+ralphctl --project-dir "$PWD" cp doctor --repair --repair-reset-circuit --repair-reset-retry-budget --strict
+# fault injection (신뢰성 테스트)
+ralphctl --project-dir "$PWD" cp fault-inject --task-id task-1 --mode lease-expire
+ralphctl --project-dir "$PWD" cp fault-inject --task-id task-1 --mode verify-fail
+ralphctl --project-dir "$PWD" cp fault-inject --task-id task-1 --mode execute-fail
+ralphctl --project-dir "$PWD" cp fault-inject --task-id task-1 --mode permission-denied
+```
+
+`cp doctor` 핵심 data integrity 체크:
+
+- `task_json_consistency`
+- `event_journal_consistency`
+- `learning_journal_consistency`
+- `event_ledger_consistency`
+- `learning_ledger_consistency`
+
+검증 정책 엔진(`unit|integration|lint|custom`) 사용 예시:
+
+```json
+{
+  "verify_cmd": "lint: golangci-lint run\nunit: go test ./...\ncustom: ./scripts/verify_extra.sh"
+}
+```
+
+접두어가 없으면 `custom`으로 처리됩니다.
+
+### 3) KPI baseline 및 canary cutover
+
+```bash
+ralphctl --project-dir "$PWD" cp baseline capture --note "v1 baseline before canary"
+ralphctl --project-dir "$PWD" cp soak --duration-sec 300 --interval-sec 30 --strict
+ralphctl --project-dir "$PWD" cp cutover evaluate --require-baseline=true --require-soak-pass=true --max-soak-age-sec 600 --output .ralph-v2/reports/cutover-evaluate.json
+ralphctl --project-dir "$PWD" cp cutover auto --require-baseline=true --require-soak-pass=true --max-soak-age-sec 600 --disable-on-fail=true --output .ralph-v2/reports/cutover-auto.json
+# 실패 타입별 롤백 정책 분리
+ralphctl --project-dir "$PWD" cp cutover auto --disable-on-fail=true --rollback-on=critical,data_integrity
+# auto 평가 전에 repair+recover 선행
+ralphctl --project-dir "$PWD" cp cutover auto --pre-repair --pre-repair-force-recover --disable-on-fail=true --rollback-on=all
+# pre-repair에서 circuit 창도 초기화
+ralphctl --project-dir "$PWD" cp cutover auto --pre-repair --pre-repair-reset-circuit --disable-on-fail=true --rollback-on=all
+# 실제 전환 없이 의사결정만 미리 확인
+ralphctl --project-dir "$PWD" cp cutover auto --dry-run --rollback-on=all
+# JSON으로 바로 확인
+ralphctl --project-dir "$PWD" cp cutover auto --dry-run --rollback-on=all --json
+# keep-current을 실패로 보지 않고 성공 종료
+ralphctl --project-dir "$PWD" cp cutover auto --rollback-on=doctor --allow-keep-current
+# canary 통과 후 v2를 기본 모드로 승격
+ralphctl --project-dir "$PWD" cp cutover enable-v2 --canary=false --note "promote v2 default"
+```
+
+헬퍼 스크립트:
+
+```bash
+./scripts/cp_canary.sh "$PWD" 300 30
+# 4번째 인자로 soak 최대 허용 age(sec) 지정 가능
+./scripts/cp_canary.sh "$PWD" 300 30 600
+./scripts/cp_rollback.sh "$PWD" "manual rollback"
+./scripts/cp_migrate_verify.sh "$PWD"
+```
+
+마이그레이션 리포트(JSON) 저장:
+
+```bash
+# dry-run 요약 리포트
+ralphctl --project-dir "$PWD" cp migrate-v1 --dry-run=true --output .ralph-v2/reports/migrate-v1-dry-run.json
+
+# 실제 적용 + parity 검증 + 리포트 저장
+ralphctl --project-dir "$PWD" cp migrate-v1 --apply --verify --strict-verify --output .ralph-v2/reports/migrate-v1-apply.json
+
+# stdout으로 JSON 출력
+ralphctl --project-dir "$PWD" cp migrate-v1 --apply --verify --json
+```
+
+참고:
+
+- ledger(`cp_event_ledger`, `cp_learning_ledger`)가 비어 있고 기존 `cp_events`/`cp_learnings` 데이터가 있으면,
+  스키마 보장 단계에서 자동 backfill 됩니다.
+
+상태 조회 API 서버:
+
+```bash
+ralphctl --project-dir "$PWD" cp api --listen 127.0.0.1:8787
+curl -s http://127.0.0.1:8787/health
+curl -s http://127.0.0.1:8787/v2/status
+curl -s http://127.0.0.1:8787/v2/metrics
+curl -s "http://127.0.0.1:8787/v2/metrics?with_baseline=true"
+curl -s http://127.0.0.1:8787/v2/metrics/summary
+curl -s http://127.0.0.1:8787/v2/doctor
+curl -s http://127.0.0.1:8787/v2/cutover
+curl -s "http://127.0.0.1:8787/v2/events?limit=50"
+curl -N http://127.0.0.1:8787/v2/events/stream
+```
+
 ## advanced
 
 ### 1) 원격/장시간 실행

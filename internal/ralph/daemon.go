@@ -65,7 +65,7 @@ func RunningRoleDaemons(paths Paths) ([]string, map[string]int) {
 	return running, pids
 }
 
-func RunSupervisor(ctx context.Context, paths Paths, profile Profile, allowedRoles map[string]struct{}, stdout io.Writer) error {
+func RunSupervisor(ctx context.Context, paths Paths, profile Profile, allowedRoles map[string]struct{}, engine string, executeWithCodex bool, stdout io.Writer) error {
 	if stdout == nil {
 		stdout = os.Stdout
 	}
@@ -79,6 +79,14 @@ func RunSupervisor(ctx context.Context, paths Paths, profile Profile, allowedRol
 	}
 
 	roleScope := RoleSetCSV(allowedRoles)
+	engineRaw := strings.ToLower(strings.TrimSpace(engine))
+	if engineRaw == "" {
+		engineRaw = "auto"
+	}
+	if roleScope != "" && engineRaw == "auto" {
+		// v2 currently does not support role-scoped supervisor workers.
+		engineRaw = "v1"
+	}
 	restartDelaySec := profile.SupervisorRestartDelaySec
 	if restartDelaySec < 0 {
 		restartDelaySec = 0
@@ -108,11 +116,17 @@ func RunSupervisor(ctx context.Context, paths Paths, profile Profile, allowedRol
 			"run",
 			"--max-loops", "0",
 		}
+		if engineRaw != "" {
+			args = append(args, "--engine", engineRaw)
+		}
+		if executeWithCodex {
+			args = append(args, "--execute-with-codex")
+		}
 		if roleScope != "" {
 			args = append(args, "--roles", roleScope)
 		}
 
-		fmt.Fprintf(stdout, "[ralph-supervisor] starting worker (roles=%s)\n", roleScopeOrAll(roleScope))
+		fmt.Fprintf(stdout, "[ralph-supervisor] starting worker (engine=%s roles=%s)\n", engineRaw, roleScopeOrAll(roleScope))
 		worker := exec.CommandContext(ctx, exe, args...)
 		worker.Stdout = stdout
 		worker.Stderr = stdout
@@ -176,10 +190,17 @@ func startDaemonWithRoleScope(paths Paths, pidFile, logFile string, allowedRoles
 	if profile.SupervisorEnabled {
 		args = append(args, "supervise")
 		if roleScope != "" {
+			// Role-scoped workers are still v1 engine.
+			args = append(args, "--engine", "v1")
+		}
+		if roleScope != "" {
 			args = append(args, "--roles", roleScope)
 		}
 	} else {
 		args = append(args, "run", "--max-loops", "0")
+		if roleScope != "" {
+			args = append(args, "--engine", "v1")
+		}
 		if roleScope != "" {
 			args = append(args, "--roles", roleScope)
 		}

@@ -1,5 +1,6 @@
 # Runtime state (generated per project)
 .ralph/
+.ralph-v2/
 
 # Optional local control directory (if configured under repo)
 .ralph-control/
@@ -17,6 +18,7 @@ dist/
 coverage.out
 coverage.txt
 *.coverprofile
+/.gocache/
 
 # OS artifacts
 .DS_Store
